@@ -1,9 +1,10 @@
 import https from "https";
 import http from "http";
+import { resolveSEOForPath, buildPrerenderHtml } from "../services/seoResolver.js";
 
 const PRERENDER_TOKEN = process.env.PRERENDER_TOKEN || "";
 const PRERENDER_SERVICE_URL = process.env.PRERENDER_SERVICE_URL || "https://service.prerender.io";
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://www.hiremyescort.com";
+const FRONTEND_URL = (process.env.FRONTEND_URL || "https://www.hiremyescort.com").replace(/\/$/, "");
 
 const BOT_USER_AGENTS = [
   "googlebot",
@@ -26,17 +27,20 @@ const BOT_USER_AGENTS = [
   "curl",
   "wget",
   "python-requests",
+  "php-curl",
   "xenu link sleuth",
+  "crawler",
+  "spider",
+  "xmlsitemap",
 ];
 
+// Crawlable frontend routes (prefix match). Dynamic city/location/profile
+// pages start with these prefixes so they are covered.
 const CRAWLABLE_ROUTES = [
   "/",
   "/call-girls",
   "/massage",
   "/couple-friendly",
-  "/call-girls/",
-  "/massage/",
-  "/couple-friendly/",
   "/search/",
   "/terms",
   "/privacy-policy",
@@ -52,25 +56,30 @@ function isBot(userAgent) {
 }
 
 function isCrawlableRoute(path) {
-  return CRAWLABLE_ROUTES.some((route) => path.startsWith(route));
+  if (path === "/") return true;
+  return CRAWLABLE_ROUTES.filter((r) => r !== "/").some(
+    (route) => path === route || path.startsWith(route.endsWith("/") ? route : `${route}/`)
+  );
 }
 
-function fetchUrl(url) {
+function fetchUrl(url, headers = {}) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith("https") ? https : http;
-    mod.get(url, { timeout: 10000 }, (res) => {
+    const req = mod.get(url, { timeout: 10000, headers }, (res) => {
       let data = "";
       res.on("data", (chunk) => { data += chunk; });
       res.on("end", () => resolve({ status: res.statusCode, data }));
-    }).on("error", reject).on("timeout", function () {
+    });
+    req.on("error", reject);
+    req.on("timeout", function () {
       this.destroy();
       reject(new Error("Timeout"));
     });
   });
 }
 
-const SKIP_ROUTES = ["/sitemap.xml", "/sitemap-categories.xml", "/sitemap-pages.xml", "/robots.txt", "/cron-job"];
-const SKIP_PREFIXES = ["/sitemap-cities-", "/sitemap-profiles-", "/sitemap-locations-"];
+const SKIP_ROUTES = ["/sitemap.xml", "/sitemap-categories.xml", "/sitemap-pages.xml", "/robots.txt", "/cron-job", "/api"];
+const SKIP_PREFIXES = ["/sitemap-cities-", "/sitemap-profiles-", "/sitemap-locations-", "/assets/", "/api/", "/prerender"];
 
 export async function prerenderMiddleware(req, res, next) {
   const userAgent = req.headers["user-agent"] || "";
@@ -86,84 +95,36 @@ export async function prerenderMiddleware(req, res, next) {
     return next();
   }
 
+  // Optional external prerender.io (only if token configured)
   if (PRERENDER_TOKEN) {
     try {
       const fullUrl = `${FRONTEND_URL}${req.originalUrl}`;
       const encodedUrl = encodeURIComponent(fullUrl);
-      const response = await fetchUrl(`${PRERENDER_SERVICE_URL}/${encodedUrl}`);
+      const response = await fetchUrl(`${PRERENDER_SERVICE_URL}/${encodedUrl}`, {
+        "X-Prerender-Token": PRERENDER_TOKEN,
+        "User-Agent": userAgent,
+      });
 
       if (response.status === 200 && response.data) {
+        res.setHeader("X-Prerendered", "external");
         return res.send(response.data);
       }
     } catch (error) {
-      console.warn("Prerender service error, falling back to SPA:", error.message);
+      console.warn("Prerender service error, falling back to DB SEO:", error.message);
     }
   }
 
-  const seoHtml = await generateSEOHtml(path);
-
-  if (seoHtml) {
-    return res.send(seoHtml);
+  // Primary path: real admin SEO from Mongo (same source as React UI)
+  try {
+    const seo = await resolveSEOForPath(req.originalUrl || path);
+    const html = buildPrerenderHtml(seo);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("X-Prerendered", "db-seo");
+    res.setHeader("X-SEO-Source", seo.source || "unknown");
+    return res.send(html);
+  } catch (err) {
+    console.warn("DB prerender failed, falling back to SPA:", err.message);
   }
 
   next();
-}
-
-async function generateSEOHtml(path) {
-  const segments = path.split("/").filter(Boolean);
-
-  if (segments.length === 0) {
-    return getBasicHTML("Home - HireMyEscort", "Indian Escorts Directory - Find verified call girls and escorts across India.");
-  }
-
-  if (segments.length >= 2) {
-    const category = segments[0];
-    const city = segments[1];
-    const title = `${city.replace(/-/g, " ").replace(/\b\w/g, (l) => l.toUpperCase())} ${category.replace(/-/g, " ").replace(/\b\w/g, (l) => l.toUpperCase())} - HireMyEscort`;
-    const description = `Find best ${category.replace(/-/g, " ")} in ${city.replace(/-/g, " ")}. Verified independent escorts, call girls, and massage services. Real profiles with photos.`;
-    return getBasicHTML(title, description);
-  }
-
-  if (segments.length === 1 && !["signup", "login", "terms", "privacy-policy", "contact"].includes(segments[0])) {
-    const category = segments[0];
-    const title = `${category.replace(/-/g, " ").replace(/\b\w/g, (l) => l.toUpperCase())} - HireMyEscort`;
-    const description = `Browse all ${category.replace(/-/g, " ")} listings across India. Find verified independent escorts and call girls.`;
-    return getBasicHTML(title, description);
-  }
-
-  return null;
-}
-
-function getBasicHTML(title, description) {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${xmlEscape(title)}</title>
-  <meta name="description" content="${xmlEscape(description)}">
-  <meta name="robots" content="index, follow">
-  <link rel="canonical" href="${FRONTEND_URL}">
-  <meta property="og:title" content="${xmlEscape(title)}">
-  <meta property="og:description" content="${xmlEscape(description)}">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="${FRONTEND_URL}">
-  <script>window.location.replace("${FRONTEND_URL}");</script>
-</head>
-<body>
-  <h1>${xmlEscape(title)}</h1>
-  <p>${xmlEscape(description)}</p>
-  <script src="/assets/index.js"></script>
-</body>
-</html>`;
-}
-
-function xmlEscape(str) {
-  if (!str) return "";
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
 }

@@ -13,6 +13,7 @@ import startTokenCleanupJob, {
   startAdExpiryJob,
 } from "./utils/tokenScheduler.js";
 import { prerenderMiddleware } from "./middleware/prerenderMiddleware.js";
+import { getPrerenderHtml } from "./controllers/seoController.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -35,6 +36,10 @@ app.use("/api/v1/seo", seoRoute);
 
 // Sitemap routes (served at root level for crawler access)
 app.use("/", sitemapRoute);
+
+// Direct prerender endpoint for Hostinger php proxy + Vercel rewrites.
+// Supports: /prerender/*  and  /prerender?path=/call-girls/delhi
+app.get(/^\/prerender(\/.*)?$/, getPrerenderHtml);
 
 app.get("/cron-job", (req, res) => {
   console.log("✅ Cron job hit at:", new Date().toLocaleString());

@@ -1,5 +1,6 @@
 import { SEO } from "../models/seoModel.js";
 import { User } from "../models/userModel.js";
+import { resolveSEOForPath, buildPrerenderHtml } from "../services/seoResolver.js";
 
 // Update SEO data (handles all levels: category only, category+city, category+city+location)
 export const updateSEO = async (req, res) => {
@@ -279,5 +280,42 @@ export const deleteSEO = async (req, res) => {
       message: "Internal server error",
       error: error.message,
     });
+  }
+};
+
+// Resolve SEO for any frontend path (public, used by prerender/PHP/edge)
+// GET /api/v1/seo/resolve?path=/call-girls/delhi
+export const getSEOByPath = async (req, res) => {
+  try {
+    const inputPath = req.query.path || req.query.url || "/";
+    const seo = await resolveSEOForPath(inputPath);
+    res.setHeader("Cache-Control", "public, max-age=300, s-maxage=600");
+    return res.status(200).json({ success: true, path: inputPath, seo });
+  } catch (error) {
+    console.error("getSEOByPath error:", error);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+};
+
+// Full crawler HTML for any frontend path (public)
+// GET /api/v1/seo/prerender?path=/call-girls/delhi  — also mounted at /prerender/*
+export const getPrerenderHtml = async (req, res) => {
+  try {
+    const inputPath =
+      req.query.path ||
+      req.params?.[0] ||
+      req.params?.wildcard ||
+      req.path.replace(/^\/prerender/, "") ||
+      "/";
+    const seo = await resolveSEOForPath(inputPath || "/");
+    const html = buildPrerenderHtml(seo);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("X-Prerendered", "true");
+    res.setHeader("X-SEO-Source", seo.source || "unknown");
+    res.setHeader("Cache-Control", "public, max-age=300, s-maxage=600");
+    return res.status(200).send(html);
+  } catch (error) {
+    console.error("getPrerenderHtml error:", error);
+    return res.status(500).send("Prerender failed");
   }
 };
