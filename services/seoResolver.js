@@ -158,8 +158,12 @@ function generatedFallback({ category, cityName, locationName, product }) {
 export async function resolveSEOForPath(inputPath) {
   const rawPath = String(inputPath || "/").split("?")[0].split("#")[0] || "/";
   const cleanPath = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+  // Canonical must be ONE stable URL per page: no trailing slash (except
+  // root), no query string. Otherwise /x and /x/ (or ?isbot=1 variants)
+  // each self-declare → "Duplicate, Google chose different canonical".
+  const canonPath = cleanPath.length > 1 ? cleanPath.replace(/\/+$/, "") : "/";
+  const canonical = `${SITE_URL}${canonPath}`;
   const segments = cleanPath.split("/").filter(Boolean);
-  const canonical = `${SITE_URL}${cleanPath === "/" ? "/" : cleanPath.replace(/\/$/, "") === "/" ? "/" : cleanPath}`;
   const defaultRobots = "index, follow";
 
   // Static pages
