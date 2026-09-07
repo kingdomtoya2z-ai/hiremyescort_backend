@@ -18,11 +18,12 @@ export const upsertBanner = async (req, res) => {
     city = normalize(city);
     location = normalize(location);
 
-    // Allowed scopes: category | category+state | category+state+city | category+state+city+location
-    if (city && !state) {
+    // Allowed scopes: category | category+state+city | category+state+city+location
+    // (state+city always come together; location needs both)
+    if ((state && !city) || (!state && city)) {
       return res.status(400).json({
         success: false,
-        message: "State is required when city is provided",
+        message: "Both state and city must be provided together, or neither",
       });
     }
     if (location && (!state || !city)) {
@@ -100,7 +101,7 @@ export const upsertBanner = async (req, res) => {
 };
 
 // Public: resolve banner for a scope.
-// Priority: exact location > city > state > category-only.
+// Priority: exact location > city > category-only.
 // A more specific banner shields its scope from broader ones
 // (e.g. a location banner wins over the city banner for that location).
 export const getBanner = async (req, res) => {
@@ -122,9 +123,6 @@ export const getBanner = async (req, res) => {
     }
     if (!banner && state && city) {
       banner = await Banner.findOne({ category, state, city, location: "" });
-    }
-    if (!banner && state) {
-      banner = await Banner.findOne({ category, state, city: "", location: "" });
     }
     if (!banner) {
       banner = await Banner.findOne({ category, state: "", city: "", location: "" });
