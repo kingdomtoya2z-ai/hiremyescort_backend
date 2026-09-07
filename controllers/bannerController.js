@@ -36,6 +36,18 @@ export const upsertBanner = async (req, res) => {
     const query = { category, state, city, location };
     const existing = await Banner.findOne(query);
 
+    // Call + WhatsApp numbers are mandatory
+    const effectiveCall = callNumber ? String(callNumber).trim() : existing?.callNumber || "";
+    const effectiveWa = whatsappNumber
+      ? String(whatsappNumber).trim()
+      : existing?.whatsappNumber || "";
+    if (!effectiveCall || !effectiveWa) {
+      return res.status(400).json({
+        success: false,
+        message: "Call number and WhatsApp number are required",
+      });
+    }
+
     // Handle image upload (field name: "image")
     let imageUrl = existing?.imageUrl || "";
     let public_id = existing?.public_id || "";
@@ -75,10 +87,8 @@ export const upsertBanner = async (req, res) => {
       location,
       imageUrl,
       public_id,
-      callNumber: callNumber ? String(callNumber).trim() : existing?.callNumber || "",
-      whatsappNumber: whatsappNumber
-        ? String(whatsappNumber).trim()
-        : existing?.whatsappNumber || "",
+      callNumber: effectiveCall,
+      whatsappNumber: effectiveWa,
     };
     if (req.user?._id && req.user._id !== "admin") {
       updateData.createdBy = req.user._id;
