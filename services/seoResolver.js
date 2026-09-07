@@ -292,7 +292,12 @@ export function buildPrerenderHtml({ title, description, keywords, canonical, og
   const oi = xmlEscape(ogImage || `${SITE_URL}/logo.png`);
   const r = xmlEscape(robots || "index, follow");
   // linkTag comes from admin — inject as-is (admin-trusted). Strip <script> for crawler safety.
-  const safeLinkTag = String(linkTag || "").replace(/<script[\s\S]*?<\/script>/gi, "");
+  // Also strip any admin <link rel="canonical"> — the system already emits the
+  // ONE correct absolute canonical above; a second (often relative-URL /
+  // trailing-slash) canonical from admin input makes crawlers ignore both.
+  const safeLinkTag = String(linkTag || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<link\b[^>]*\brel\s*=\s*["']canonical["'][^>]*>/gi, "");
   // htmlSnippet is admin rich content — strip scripts/iframes for crawler HTML, keep formatting.
   const safeSnippet = String(htmlSnippet || "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<iframe[\s\S]*?<\/iframe>/gi, "");
   const snippetBlock = safeSnippet
