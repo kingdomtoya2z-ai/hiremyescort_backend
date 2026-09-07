@@ -7,3 +7,6 @@ export const singleUpload = multer({ storage }).single('file');
 
 //multiple upload upto 5 images
 export const multipleUpload = multer({ storage }).array('files', 5);
+
+//banner upload (single image, field name: "image")
+export const bannerUpload = multer({ storage }).single('image');
