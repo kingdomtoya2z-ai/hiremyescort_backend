@@ -693,17 +693,58 @@ export const updateProduct = async (req, res) => {
 // Admin functions
 export const getAllAdsForAdmin = async (req, res) => {
   try {
-    const allAds = await Product.find()
-      .populate({
-        path: "userId",
-        select: "firstName lastName email phoneNo city state",
-      })
-      .sort({ createdAt: -1 });
+    const { status, search, page, limit } = req.query;
 
+    // Build a filter so the admin can request only what they need
+    // (e.g. ?status=pending) instead of always downloading every ad.
+    const filter = {};
+    if (status) {
+      filter.status = status;
+    }
+    if (search) {
+      const safeSearch = String(search).trim();
+      if (safeSearch) {
+        filter.$or = [
+          { title: { $regex: safeSearch, $options: "i" } },
+          { city: { $regex: safeSearch, $options: "i" } },
+          { state: { $regex: safeSearch, $options: "i" } },
+          { location: { $regex: safeSearch, $options: "i" } },
+          { category: { $regex: safeSearch, $options: "i" } },
+        ];
+      }
+    }
+
+    let query = Product.find(filter).populate({
+      path: "userId",
+      select: "firstName lastName email phoneNo city state",
+    });
+
+    // Optional pagination (used by the dashboard's live-updating sections)
+    const parsedPage = Math.max(Number(page) || 1, 1);
+    const parsedLimit = Math.min(Math.max(Number(limit) || 50, 1), 100);
+    const hasPagination = page !== undefined || limit !== undefined;
+
+    if (hasPagination) {
+      const skip = (parsedPage - 1) * parsedLimit;
+      const [totalCount, ads] = await Promise.all([
+        Product.countDocuments(filter),
+        query.sort({ createdAt: -1 }).skip(skip).limit(parsedLimit).lean(),
+      ]);
+      return res.status(200).json({
+        success: true,
+        message: "Advertisements fetched",
+        ads,
+        total: totalCount,
+        page: parsedPage,
+        limit: parsedLimit,
+      });
+    }
+
+    const ads = await query.sort({ createdAt: -1 });
     return res.status(200).json({
       success: true,
       message: "All advertisements fetched",
-      ads: allAds,
+      ads,
     });
   } catch (error) {
     return res.status(500).json({
