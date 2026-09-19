@@ -56,3 +56,17 @@ app.listen(PORT, () => {
   startAdExpiryJob(); // Start ad expiry job
   console.log(`Server is listening at port:${PORT}`);
 });
+
+// Optional memory monitor for diagnosing leaks (MEMORY_MONITOR=true)
+if (process.env.MEMORY_MONITOR === "true") {
+  console.log("🧠 Memory monitor enabled (MEMORY_MONITOR=true)...");
+  setInterval(() => {
+    const m = process.memoryUsage();
+    console.log("MEMORY:", JSON.stringify({
+      rss: `${Math.round(m.rss / 1024 / 1024)} MB`,
+      heapTotal: `${Math.round(m.heapTotal / 1024 / 1024)} MB`,
+      heapUsed: `${Math.round(m.heapUsed / 1024 / 1024)} MB`,
+      external: `${Math.round(m.external / 1024 / 1024)} MB`,
+    }));
+  }, 30 * 1000);
+}

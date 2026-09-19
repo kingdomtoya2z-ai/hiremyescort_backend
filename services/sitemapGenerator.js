@@ -6,6 +6,23 @@ const SITE_URL = process.env.FRONTEND_URL || "https://www.hiremyescort.com";
 const SITEMAP_BASE_URL = process.env.SITEMAP_BASE_URL || SITE_URL;
 const MAX_URLS_PER_SITEMAP = 50000;
 
+// Crawlers fetch sitemaps constantly; building one means re-reading the whole
+// Product/State/SEO collections and concatenating large XML every hit. Cache
+// the generated XML briefly (matching the Cache-Control headers set).
+const SITEMAP_TTL = 10 * 60 * 1000; // 10 minutes
+const sitemapCache = new Map();
+
+async function withSitemapCache(key, fn) {
+  const hit = sitemapCache.get(key);
+  if (hit && Date.now() - hit.at < SITEMAP_TTL) {
+    return hit.value;
+  }
+  const value = await fn();
+  if (sitemapCache.size > 100) sitemapCache.clear();
+  sitemapCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
 const categorySlugMap = {
   "Call Girls": "call-girls",
   Massage: "massage",
@@ -116,174 +133,184 @@ export async function getAllSitemapData() {
 }
 
 export async function generateCitiesSitemap(page = 0) {
-  const { flatCities, products, states } = await getAllSitemapData();
-  const categories = Object.keys(reverseCategoryMap);
+  return withSitemapCache(`cities:${page}`, async () => {
+    const { flatCities, products, states } = await getAllSitemapData();
+    const categories = Object.keys(reverseCategoryMap);
 
-  // Only list cities that actually have live ads — empty city pages are thin
-  // content and burn crawl budget ("Crawled/Discovered - currently not indexed").
-  // City match must mirror seoResolver: product.city ↔ State city name.
-  const knownCities = new Set();
-  for (const st of states) {
-    for (const c of st.cities || []) knownCities.add(slugify(c.name));
-  }
-  const pairsWithAds = new Set();
-  for (const p of products) {
-    if (!p.city) continue;
-    const citySlug = slugify(p.city);
-    if (!knownCities.has(citySlug)) continue;
-    const catSlug = categorySlugMap[p.category] || slugify(p.category);
-    if (categories.includes(catSlug)) pairsWithAds.add(`${catSlug}/${citySlug}`);
-  }
-
-  const urls = [];
-  const seen = new Set();
-
-  for (const city of flatCities) {
-    const citySlug = slugify(city.name);
-    for (const category of categories) {
-      const key = `${category}/${citySlug}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (!pairsWithAds.has(key)) continue;
-      urls.push({
-        loc: `${SITE_URL}/${category}/${citySlug}`,
-        lastmod: formatDate(new Date()),
-        changefreq: "daily",
-        priority: "0.8",
-      });
+    // Only list cities that actually have live ads — empty city pages are thin
+    // content and burn crawl budget ("Crawled/Discovered - currently not indexed").
+    // City match must mirror seoResolver: product.city ↔ State city name.
+    const knownCities = new Set();
+    for (const st of states) {
+      for (const c of st.cities || []) knownCities.add(slugify(c.name));
     }
-  }
+    const pairsWithAds = new Set();
+    for (const p of products) {
+      if (!p.city) continue;
+      const citySlug = slugify(p.city);
+      if (!knownCities.has(citySlug)) continue;
+      const catSlug = categorySlugMap[p.category] || slugify(p.category);
+      if (categories.includes(catSlug)) pairsWithAds.add(`${catSlug}/${citySlug}`);
+    }
 
-  const start = page * MAX_URLS_PER_SITEMAP;
-  const end = start + MAX_URLS_PER_SITEMAP;
-  const pageUrls = urls.slice(start, end);
+    const urls = [];
+    const seen = new Set();
 
-  let xml = generateXMLHeader() + "\n";
-  for (const u of pageUrls) {
-    xml += urlElement(u.loc, u.lastmod, u.changefreq, u.priority) + "\n";
-  }
-  xml += generateXMLFooter();
-  return { xml, total: urls.length, pages: Math.max(1, Math.ceil(urls.length / MAX_URLS_PER_SITEMAP)) };
+    for (const city of flatCities) {
+      const citySlug = slugify(city.name);
+      for (const category of categories) {
+        const key = `${category}/${citySlug}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (!pairsWithAds.has(key)) continue;
+        urls.push({
+          loc: `${SITE_URL}/${category}/${citySlug}`,
+          lastmod: formatDate(new Date()),
+          changefreq: "daily",
+          priority: "0.8",
+        });
+      }
+    }
+
+    const start = page * MAX_URLS_PER_SITEMAP;
+    const end = start + MAX_URLS_PER_SITEMAP;
+    const pageUrls = urls.slice(start, end);
+
+    let xml = generateXMLHeader() + "\n";
+    for (const u of pageUrls) {
+      xml += urlElement(u.loc, u.lastmod, u.changefreq, u.priority) + "\n";
+    }
+    xml += generateXMLFooter();
+    return { xml, total: urls.length, pages: Math.max(1, Math.ceil(urls.length / MAX_URLS_PER_SITEMAP)) };
+  });
 }
 
 export async function generateCategoriesSitemap() {
-  const categories = Object.keys(reverseCategoryMap);
-  let xml = generateXMLHeader() + "\n";
+  return withSitemapCache("categories", async () => {
+    const categories = Object.keys(reverseCategoryMap);
+    let xml = generateXMLHeader() + "\n";
 
-  for (const cat of categories) {
-    xml += urlElement(`${SITE_URL}/${cat}`, formatDate(new Date()), "daily", "0.9") + "\n";
-  }
+    for (const cat of categories) {
+      xml += urlElement(`${SITE_URL}/${cat}`, formatDate(new Date()), "daily", "0.9") + "\n";
+    }
 
-  xml += generateXMLFooter();
-  return xml;
+    xml += generateXMLFooter();
+    return xml;
+  });
 }
 
 export async function generateLocationsSitemap(page = 0) {
-  const { flatLocations, products } = await getAllSitemapData();
-  const categories = Object.keys(reverseCategoryMap);
+  return withSitemapCache(`locations:${page}`, async () => {
+    const { flatLocations, products } = await getAllSitemapData();
+    const categories = Object.keys(reverseCategoryMap);
 
-  // Same thin-content rule as cities: only locations with live ads.
-  const triplesWithAds = new Set();
-  for (const p of products) {
-    if (!p.city) continue;
-    const locName = locationNameOf(p.location);
-    if (!locName) continue;
-    const catSlug = categorySlugMap[p.category] || slugify(p.category);
-    if (categories.includes(catSlug)) {
-      triplesWithAds.add(`${catSlug}/${slugify(p.city)}/${slugify(locName)}`);
+    // Same thin-content rule as cities: only locations with live ads.
+    const triplesWithAds = new Set();
+    for (const p of products) {
+      if (!p.city) continue;
+      const locName = locationNameOf(p.location);
+      if (!locName) continue;
+      const catSlug = categorySlugMap[p.category] || slugify(p.category);
+      if (categories.includes(catSlug)) {
+        triplesWithAds.add(`${catSlug}/${slugify(p.city)}/${slugify(locName)}`);
+      }
     }
-  }
 
-  const urls = [];
-  const seen = new Set();
+    const urls = [];
+    const seen = new Set();
 
-  for (const loc of flatLocations) {
-    const citySlug = slugify(loc.city);
-    const locationSlug = slugify(loc.name);
-    for (const category of categories) {
-      const key = `${category}/${citySlug}/${locationSlug}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (!triplesWithAds.has(key)) continue;
-      urls.push({
-        loc: `${SITE_URL}/${category}/${citySlug}/${locationSlug}`,
-        lastmod: formatDate(new Date()),
-        changefreq: "daily",
-        priority: "0.7",
-      });
+    for (const loc of flatLocations) {
+      const citySlug = slugify(loc.city);
+      const locationSlug = slugify(loc.name);
+      for (const category of categories) {
+        const key = `${category}/${citySlug}/${locationSlug}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (!triplesWithAds.has(key)) continue;
+        urls.push({
+          loc: `${SITE_URL}/${category}/${citySlug}/${locationSlug}`,
+          lastmod: formatDate(new Date()),
+          changefreq: "daily",
+          priority: "0.7",
+        });
+      }
     }
-  }
 
-  const start = page * MAX_URLS_PER_SITEMAP;
-  const end = start + MAX_URLS_PER_SITEMAP;
-  const pageUrls = urls.slice(start, end);
+    const start = page * MAX_URLS_PER_SITEMAP;
+    const end = start + MAX_URLS_PER_SITEMAP;
+    const pageUrls = urls.slice(start, end);
 
-  let xml = generateXMLHeader() + "\n";
-  for (const u of pageUrls) {
-    xml += urlElement(u.loc, u.lastmod, u.changefreq, u.priority) + "\n";
-  }
-  xml += generateXMLFooter();
-  return { xml, total: urls.length, pages: Math.max(1, Math.ceil(urls.length / MAX_URLS_PER_SITEMAP)) };
+    let xml = generateXMLHeader() + "\n";
+    for (const u of pageUrls) {
+      xml += urlElement(u.loc, u.lastmod, u.changefreq, u.priority) + "\n";
+    }
+    xml += generateXMLFooter();
+    return { xml, total: urls.length, pages: Math.max(1, Math.ceil(urls.length / MAX_URLS_PER_SITEMAP)) };
+  });
 }
 
 export async function generateProfilesSitemap(page = 0) {
-  const { products } = await getAllSitemapData();
-  const urls = [];
+  return withSitemapCache(`profiles:${page}`, async () => {
+    const { products } = await getAllSitemapData();
+    const urls = [];
 
-  for (const product of products) {
-    if (!product.city) continue;
-    const categorySlug = categorySlugMap[product.category] || slugify(product.category);
-    const citySlug = slugify(product.city);
-    const locationSlug = slugify(locationNameOf(product.location));
-    const lastmod = formatDate(product.updatedAt || product.createdAt);
-    const images = (product.productImg || []).map((img) => img.url).filter(Boolean);
+    for (const product of products) {
+      if (!product.city) continue;
+      const categorySlug = categorySlugMap[product.category] || slugify(product.category);
+      const citySlug = slugify(product.city);
+      const locationSlug = slugify(locationNameOf(product.location));
+      const lastmod = formatDate(product.updatedAt || product.createdAt);
+      const images = (product.productImg || []).map((img) => img.url).filter(Boolean);
 
-    let loc;
-    if (locationSlug) {
-      loc = `${SITE_URL}/${categorySlug}/${citySlug}/${locationSlug}/details/${product._id}`;
-    } else {
-      loc = `${SITE_URL}/${categorySlug}/${citySlug}/details/${product._id}`;
+      let loc;
+      if (locationSlug) {
+        loc = `${SITE_URL}/${categorySlug}/${citySlug}/${locationSlug}/details/${product._id}`;
+      } else {
+        loc = `${SITE_URL}/${categorySlug}/${citySlug}/details/${product._id}`;
+      }
+
+      urls.push({
+        loc,
+        lastmod,
+        changefreq: "weekly",
+        priority: "0.6",
+        images,
+      });
     }
 
-    urls.push({
-      loc,
-      lastmod,
-      changefreq: "weekly",
-      priority: "0.6",
-      images,
-    });
-  }
+    const start = page * MAX_URLS_PER_SITEMAP;
+    const end = start + MAX_URLS_PER_SITEMAP;
+    const pageUrls = urls.slice(start, end);
 
-  const start = page * MAX_URLS_PER_SITEMAP;
-  const end = start + MAX_URLS_PER_SITEMAP;
-  const pageUrls = urls.slice(start, end);
-
-  let xml = generateXMLHeader() + "\n";
-  for (const u of pageUrls) {
-    xml += urlElement(u.loc, u.lastmod, u.changefreq, u.priority, u.images) + "\n";
-  }
-  xml += generateXMLFooter();
-  return { xml, total: urls.length, pages: Math.max(1, Math.ceil(urls.length / MAX_URLS_PER_SITEMAP)) };
+    let xml = generateXMLHeader() + "\n";
+    for (const u of pageUrls) {
+      xml += urlElement(u.loc, u.lastmod, u.changefreq, u.priority, u.images) + "\n";
+    }
+    xml += generateXMLFooter();
+    return { xml, total: urls.length, pages: Math.max(1, Math.ceil(urls.length / MAX_URLS_PER_SITEMAP)) };
+  });
 }
 
 export async function generatePagesSitemap() {
-  // NOTE: /signup and /login are intentionally NOT listed — they serve
-  // "noindex, follow" (see seoResolver). Submitting noindex URLs in a
-  // sitemap produces "Excluded by 'noindex' tag" in Search Console.
-  const staticPages = [
-    { loc: `${SITE_URL}/`, priority: "1.0", changefreq: "daily" },
-    { loc: `${SITE_URL}/terms`, priority: "0.3", changefreq: "monthly" },
-    { loc: `${SITE_URL}/privacy-policy`, priority: "0.3", changefreq: "monthly" },
-    { loc: `${SITE_URL}/contact`, priority: "0.5", changefreq: "monthly" },
-    { loc: `${SITE_URL}/search/location`, priority: "0.6", changefreq: "daily" },
-  ];
+  return withSitemapCache("pages", async () => {
+    // NOTE: /signup and /login are intentionally NOT listed — they serve
+    // "noindex, follow" (see seoResolver). Submitting noindex URLs in a
+    // sitemap produces "Excluded by 'noindex' tag" in Search Console.
+    const staticPages = [
+      { loc: `${SITE_URL}/`, priority: "1.0", changefreq: "daily" },
+      { loc: `${SITE_URL}/terms`, priority: "0.3", changefreq: "monthly" },
+      { loc: `${SITE_URL}/privacy-policy`, priority: "0.3", changefreq: "monthly" },
+      { loc: `${SITE_URL}/contact`, priority: "0.5", changefreq: "monthly" },
+      { loc: `${SITE_URL}/search/location`, priority: "0.6", changefreq: "daily" },
+    ];
 
-  let xml = generateXMLHeader() + "\n";
-  for (const page of staticPages) {
-    xml += urlElement(page.loc, formatDate(new Date()), page.changefreq, page.priority) + "\n";
-  }
-  xml += generateXMLFooter();
-  return xml;
+    let xml = generateXMLHeader() + "\n";
+    for (const page of staticPages) {
+      xml += urlElement(page.loc, formatDate(new Date()), page.changefreq, page.priority) + "\n";
+    }
+    xml += generateXMLFooter();
+    return xml;
+  });
 }
 
 function countSitemapUrls(data) {
@@ -344,28 +371,30 @@ function countSitemapUrls(data) {
 }
 
 export async function generateSitemapIndexXml() {
-  const data = await getAllSitemapData();
-  const { citiesPages, locationsPages, profilesPages } = countSitemapUrls(data);
+  return withSitemapCache("index", async () => {
+    const data = await getAllSitemapData();
+    const { citiesPages, locationsPages, profilesPages } = countSitemapUrls(data);
 
-  const files = [];
+    const files = [];
 
-  files.push("sitemap-categories.xml");
+    files.push("sitemap-categories.xml");
 
-  for (let i = 0; i < citiesPages; i++) {
-    files.push(`sitemap-cities-${i + 1}.xml`);
-  }
+    for (let i = 0; i < citiesPages; i++) {
+      files.push(`sitemap-cities-${i + 1}.xml`);
+    }
 
-  for (let i = 0; i < locationsPages; i++) {
-    files.push(`sitemap-locations-${i + 1}.xml`);
-  }
+    for (let i = 0; i < locationsPages; i++) {
+      files.push(`sitemap-locations-${i + 1}.xml`);
+    }
 
-  for (let i = 0; i < profilesPages; i++) {
-    files.push(`sitemap-profiles-${i + 1}.xml`);
-  }
+    for (let i = 0; i < profilesPages; i++) {
+      files.push(`sitemap-profiles-${i + 1}.xml`);
+    }
 
-  files.push("sitemap-pages.xml");
+    files.push("sitemap-pages.xml");
 
-  return generateSitemapIndex(files);
+    return generateSitemapIndex(files);
+  });
 }
 
 export async function generatePaginatableSitemap(type, page = 1) {

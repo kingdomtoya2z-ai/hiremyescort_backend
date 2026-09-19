@@ -40,10 +40,9 @@ router.get("/user/my-ads", isAuthenticated, getUserAdsForDashboard);
 router.get("/search", async (req, res) => {
   try {
     const { category, city, location } = req.query;
-
-    console.log("\n=== BACKEND SEARCH REQUEST ===");
-    console.log("Timestamp:", new Date().toLocaleString());
-    console.log("Query params received:", { category, city, location });
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+    const skip = (page - 1) * limit;
 
     // Build filter object
     const filter = {
@@ -61,45 +60,39 @@ router.get("/search", async (req, res) => {
     // FILTER 1: Category
     if (category && categoryMap[category]) {
       filter.category = { $in: categoryMap[category] };
-      console.log("✓ Category filter applied:", categoryMap[category]);
-    } else if (category) {
-      console.log("⚠ Category provided but not in map:", category);
-    } else {
-      console.log("⊙ No category filter (showing all categories)");
     }
 
     // FILTER 2: City
     if (city) {
       const cityNormalized = city.toLowerCase().replace(/-/g, " ");
       filter.city = { $regex: cityNormalized, $options: "i" };
-      console.log("✓ City filter applied for:", cityNormalized);
-    } else {
-      console.log("⊙ No city filter");
     }
 
     // FILTER 3: Location
     if (location) {
       const locationNormalized = location.toLowerCase().replace(/-/g, " ");
       filter.location = { $regex: locationNormalized, $options: "i" };
-      console.log("✓ Location filter applied for:", locationNormalized);
-    } else {
-      console.log("⊙ No location filter");
     }
 
-    console.log("Final MongoDB filter:", JSON.stringify(filter, null, 2));
-
     // Execute query
+    const total = await Product.countDocuments(filter);
     const products = await Product.find(filter)
       .sort({ adType: 1, createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
       .lean();
 
-    console.log("✓ Returned products:", products.length);
-    console.log("=== END SEARCH REQUEST ===\n");
+    console.log(
+      `[search] category=${category || "-"} city=${city || "-"} location=${location || "-"} → ${products.length} of ${total} results`,
+    );
 
     res.status(200).json({
       success: true,
       products,
       count: products.length,
+      total,
+      page,
+      limit,
       filters: { category, city, location },
     });
   } catch (error) {

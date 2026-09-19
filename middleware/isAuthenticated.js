@@ -4,7 +4,6 @@ import jwt from "jsonwebtoken";
 export const isAuthenticated = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
-    console.log("Auth header:", authHeader);
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       console.log("Missing or invalid Bearer token");
       return res.status(400).json({
@@ -16,7 +15,6 @@ export const isAuthenticated = async (req, res, next) => {
     let decoded;
     try {
       decoded = jwt.verify(token, process.env.SECRET_KEY);
-      console.log("Token verified successfully, decoded:", decoded);
     } catch (error) {
       console.log("Token verification error:", error.message);
       if (error.name === "TokenExpiredError") {

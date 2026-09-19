@@ -43,6 +43,32 @@ function normalizeName(s) {
   return String(s || "").toLowerCase().trim();
 }
 
+// The full States snapshot is scanned on EVERY bot/prerender/listing request.
+// Cache it briefly to avoid re-fetching the whole collection 100s of times/min.
+const STATES_TTL = 10 * 60 * 1000; // 10 minutes
+let statesCache = { data: null, at: 0, loading: null };
+
+async function getStatesCached() {
+  if (statesCache.data && Date.now() - statesCache.at < STATES_TTL) {
+    return statesCache.data;
+  }
+  if (statesCache.loading) {
+    return statesCache.loading;
+  }
+  statesCache.loading = State.find()
+    .select("name cities.name cities.locations.name")
+    .lean()
+    .then((states) => {
+      statesCache = { data: states, at: Date.now(), loading: null };
+      return states;
+    })
+    .catch((err) => {
+      statesCache.loading = null;
+      throw err;
+    });
+  return statesCache.loading;
+}
+
 /**
  * Find state name for a city slug by scanning State collection.
  * Returns { stateName, cityName, locationName } with proper casing, or nulls.
@@ -50,7 +76,7 @@ function normalizeName(s) {
 async function resolveLocation(citySlug, locationSlug) {
   if (!citySlug) return { stateName: "", cityName: "", locationName: "" };
   const citySearch = normalizeName(citySlug.replace(/-/g, " "));
-  const states = await State.find().select("name cities.name cities.locations.name").lean();
+  const states = await getStatesCached();
   for (const st of states) {
     for (const c of st.cities || []) {
       if (normalizeName(c.name) === citySearch) {
