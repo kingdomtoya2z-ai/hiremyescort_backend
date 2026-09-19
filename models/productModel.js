@@ -44,4 +44,16 @@ const productSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// Compound index for the public search filter + ordering:
+// status/isExpired/category narrow the scan, city matches next,
+// adType+createdAt give the premium→golden→free sort without a sort stage scan.
+productSchema.index({
+  status: 1,
+  isExpired: 1,
+  category: 1,
+  city: 1,
+  adType: 1,
+  createdAt: -1,
+});
+
 export const Product = mongoose.model("Product", productSchema);

@@ -11,19 +11,19 @@ import {
   getUserAdsForDashboard,
 } from "../controllers/productController.js";
 import { isAdmin, isAuthenticated } from "../middleware/isAuthenticated.js";
-import { multipleUpload } from "../middleware/multer.js";
+import { multipleUpload, runUpload } from "../middleware/multer.js";
 import { Product } from "../models/productModel.js";
 import { escapeRegex } from "../utils/sanitize.js";
 
 const router = express.Router();
 
-router.post("/add", isAuthenticated, multipleUpload, addProduct);
+router.post("/add", isAuthenticated, runUpload(multipleUpload), addProduct);
 router.get("/getallproducts", getAllProduct);
 router.delete("/delete/:productId", isAuthenticated, deleteProduct);
 router.put(
   "/update/:productId",
   isAuthenticated,
-  multipleUpload,
+  runUpload(multipleUpload),
   updateProduct,
 );
 
@@ -74,32 +74,41 @@ router.get("/search", async (req, res) => {
       filter.location = { $regex: locationNormalized, $options: "i" };
     }
 
-    // Execute query
-    const total = await Product.countDocuments(filter);
-    const products = await Product.aggregate([
-      { $match: filter },
-      {
-        $addFields: {
-          adTypeSort: {
-            $switch: {
-              branches: [
-                { case: { $eq: ["$adType", "premium"] }, then: 0 },
-                { case: { $eq: ["$adType", "golden"] }, then: 1 },
-              ],
-              default: 2,
+    // Execute query (single DB round trip: count + filtered page together)
+const [facet = {}] = await Product.aggregate([
+  { $match: filter },
+  {
+    $facet: {
+      total: [{ $count: "count" }],
+      results: [
+        {
+          $addFields: {
+            adTypeSort: {
+              $switch: {
+                branches: [
+                  { case: { $eq: ["$adType", "premium"] }, then: 0 },
+                  { case: { $eq: ["$adType", "golden"] }, then: 1 },
+                ],
+                default: 2,
+              },
             },
           },
         },
-      },
-      { $sort: { adTypeSort: 1, createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limit },
-      { $unset: "adTypeSort" },
-    ]);
+        { $sort: { adTypeSort: 1, createdAt: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+        { $unset: "adTypeSort" },
+      ],
+    },
+  },
+]);
 
-    console.log(
-      `[search] category=${category || "-"} city=${city || "-"} location=${location || "-"} → ${products.length} of ${total} results`,
-    );
+const total = facet?.total?.[0]?.count ?? 0;
+const products = facet?.results ?? [];
+
+console.log(
+  `[search] category=${category || "-"} city=${city || "-"} location=${location || "-"} → ${products.length} of ${total} results`,
+);
 
     res.status(200).json({
       success: true,

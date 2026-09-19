@@ -3,6 +3,12 @@ import { User } from "../models/userModel.js";
 import { CoinTransaction } from "../models/coinTransactionModel.js";
 import cloudinary from "../utils/cloudinary.js";
 import getDataUri from "../utils/dataUri.js";
+import {
+  FREE_AD_LIMIT,
+  countActiveFreeAds,
+  getMaxImagesForAdType,
+  validateAdText,
+} from "../utils/adValidation.js";
 
 import {
   sendAdApprovalMail,
@@ -94,6 +100,12 @@ export const addProduct = async (req, res) => {
       });
     }
 
+    // Title/description rules: max length + no numbers allowed
+    const textError = validateAdText({ title, about });
+    if (textError) {
+      return res.status(400).json({ success: false, message: textError });
+    }
+
     // Coin costs for ad types
     const coinCosts = {
       free: 0,
@@ -102,6 +114,26 @@ export const addProduct = async (req, res) => {
     };
 
     const coinsNeeded = coinCosts[adType] || 0;
+
+    // Free ads: a user can have at most FREE_AD_LIMIT at once
+    if (adType === "free") {
+      const freeCount = await countActiveFreeAds(userId);
+      if (freeCount >= FREE_AD_LIMIT) {
+        return res.status(400).json({
+          success: false,
+          message: `You can only have ${FREE_AD_LIMIT} free ads. Please delete or upgrade one of your existing free ads before posting another.`,
+        });
+      }
+    }
+
+    // Image limit by ad type (free=1, golden/premium=4)
+    const maxImages = getMaxImagesForAdType(adType);
+    if (req.files && req.files.length > maxImages) {
+      return res.status(400).json({
+        success: false,
+        message: `Maximum ${maxImages} image${maxImages > 1 ? "s" : ""} allowed for ${adType} ads.`,
+      });
+    }
 
     // Check if user has enough coins for paid ads
     if (adType !== "free") {
@@ -416,6 +448,36 @@ export const updateProduct = async (req, res) => {
       });
     }
 
+    // Title/description rules: max length + no numbers allowed
+    const textError = validateAdText({ title, about });
+    if (textError) {
+      return res.status(400).json({ success: false, message: textError });
+    }
+
+    // Target ad type (final type after this update)
+    const newAdType = adType ?? product.adType;
+
+    // Free ads: a user can have at most FREE_AD_LIMIT at once (excluding this ad)
+    if (newAdType === "free") {
+      const freeCount = await countActiveFreeAds(userId, productId);
+      if (freeCount >= FREE_AD_LIMIT) {
+        return res.status(400).json({
+          success: false,
+          message: `You can only have ${FREE_AD_LIMIT} free ads. Please delete or upgrade one of your existing free ads before switching this ad to free.`,
+        });
+      }
+    }
+
+    // Image limit by target ad type (free=1, golden/premium=4)
+    const maxImages = getMaxImagesForAdType(newAdType);
+    const incomingFiles = req.files?.length || 0;
+    if (incomingFiles > maxImages) {
+      return res.status(400).json({
+        success: false,
+        message: `Maximum ${maxImages} image${maxImages > 1 ? "s" : ""} allowed for ${newAdType} ads.`,
+      });
+    }
+
     // ---------------------------
     // SAFE IMAGE ARRAY
     // ---------------------------
@@ -423,12 +485,10 @@ export const updateProduct = async (req, res) => {
       ? [...product.productImg]
       : [];
 
-    // ---------------------------
-    // SAFE EXISTING IMAGES
-    // ---------------------------
+    // Parse which existing images to keep BEFORE deleting anything, so the
+    // total image count can be validated without destroying cloudinary files.
+    let keepIds = [];
     if (existingImages) {
-      let keepIds = [];
-
       try {
         keepIds = JSON.parse(existingImages);
         if (!Array.isArray(keepIds)) keepIds = [];
@@ -436,22 +496,30 @@ export const updateProduct = async (req, res) => {
         console.error("❌ existingImages parse error:", err.message);
         keepIds = [];
       }
+    }
 
-      const removeImages = updatedImages.filter(
-        (img) => !keepIds.includes(img.public_id),
-      );
+    const keptImages = updatedImages.filter((img) =>
+      keepIds.includes(img.public_id),
+    );
 
-      updatedImages = updatedImages.filter((img) =>
-        keepIds.includes(img.public_id),
-      );
+    if (keptImages.length + incomingFiles > maxImages) {
+      return res.status(400).json({
+        success: false,
+        message: `Maximum ${maxImages} image${maxImages > 1 ? "s" : ""} allowed for ${newAdType} ads (you have ${keptImages.length} saved and are adding ${incomingFiles}).`,
+      });
+    }
 
-      // delete removed images from cloudinary
-      for (let img of removeImages) {
-        try {
-          await cloudinary.uploader.destroy(img.public_id);
-        } catch (err) {
-          console.error("❌ Cloudinary delete error:", err.message);
-        }
+    // Safe to proceed: remove images the user dropped, then append new uploads
+    const removeImages = updatedImages.filter(
+      (img) => !keepIds.includes(img.public_id),
+    );
+    updatedImages = keptImages;
+
+    for (let img of removeImages) {
+      try {
+        await cloudinary.uploader.destroy(img.public_id);
+      } catch (err) {
+        console.error("❌ Cloudinary delete error:", err.message);
       }
     }
 
@@ -501,17 +569,14 @@ export const updateProduct = async (req, res) => {
       }
     }
 
-    // ---------------------------
-    // COIN COSTS FOR AD TYPES
-    // ---------------------------
+    // Coin costs for ad types
     const coinCosts = {
       free: 0,
       golden: 100,
       premium: 200,
     };
 
-    // Get the new adType (or keep the old one if not provided)
-    const newAdType = adType ?? product.adType;
+    // newAdType is computed earlier (used for image/quota validation)
     const coinsNeeded = coinCosts[newAdType] || 0;
 
     // Check if user has enough coins for paid ads when resubmitting
