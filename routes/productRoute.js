@@ -76,11 +76,26 @@ router.get("/search", async (req, res) => {
 
     // Execute query
     const total = await Product.countDocuments(filter);
-    const products = await Product.find(filter)
-      .sort({ adType: 1, createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
+    const products = await Product.aggregate([
+      { $match: filter },
+      {
+        $addFields: {
+          adTypeSort: {
+            $switch: {
+              branches: [
+                { case: { $eq: ["$adType", "premium"] }, then: 0 },
+                { case: { $eq: ["$adType", "golden"] }, then: 1 },
+              ],
+              default: 2,
+            },
+          },
+        },
+      },
+      { $sort: { adTypeSort: 1, createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limit },
+      { $unset: "adTypeSort" },
+    ]);
 
     console.log(
       `[search] category=${category || "-"} city=${city || "-"} location=${location || "-"} → ${products.length} of ${total} results`,
