@@ -1,5 +1,5 @@
 import { State } from "../models/statesCitiesModel.js";
-import { escapeRegex, ensureString } from "../utils/sanitize.js";
+import { escapeRegex, ensureString, toBoolean } from "../utils/sanitize.js";
 import cloudinary from "../utils/cloudinary.js";
 import getDataUri from "../utils/dataUri.js";
 
@@ -392,7 +392,13 @@ export const toggleTopCity = async (req, res) => {
       });
     }
 
-    const becomingTop = Boolean(isTopCity);
+    /*
+     * Must be parsed, not coerced. This endpoint accepts multipart so the image
+     * and the flag travel together, and every FormData field arrives as a
+     * string - `isTopCity: "false"` would make `Boolean(isTopCity)` true and the
+     * whole "remove this city from the home page" path would invert.
+     */
+    const becomingTop = toBoolean(isTopCity);
 
     /*
      * Resolve the image first, because marking a city top requires one. A city
@@ -422,7 +428,10 @@ export const toggleTopCity = async (req, res) => {
         });
       }
     } else if (requestedImage === "none") {
+      // Explicit delete from the admin UI. The flag is cleared below because a
+      // top city with no image is not a valid state.
       image = "";
+      if (city.imagePublicId) replacedPublicId = city.imagePublicId;
       city.imagePublicId = "";
     } else if (requestedImage) {
       image = requestedImage;
