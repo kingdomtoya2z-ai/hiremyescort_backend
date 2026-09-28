@@ -1,5 +1,7 @@
 import { State } from "../models/statesCitiesModel.js";
 import { escapeRegex, ensureString } from "../utils/sanitize.js";
+import cloudinary from "../utils/cloudinary.js";
+import getDataUri from "../utils/dataUri.js";
 
 export const addState = async (req, res) => {
   try {
@@ -361,6 +363,9 @@ export const getCitySEO = async (req, res) => {
 export const toggleTopCity = async (req, res) => {
   try {
     const { stateId, cityId, isTopCity } = req.body;
+    // Optional. Sent as a URL when the client is replacing the photo without
+    // re-uploading it, or as "none" to clear an existing one.
+    const requestedImage = ensureString(req.body.image);
 
     if (!stateId || !cityId) {
       return res.status(400).json({
@@ -387,8 +392,63 @@ export const toggleTopCity = async (req, res) => {
       });
     }
 
-    city.isTopCity = isTopCity;
+    const becomingTop = Boolean(isTopCity);
+
+    /*
+     * Resolve the image first, because marking a city top requires one. A city
+     * with no photo has nothing to show on the home page, so the flag and the
+     * image are written together - there is no window where a top city exists
+     * without an image.
+     */
+    let image = city.image || "";
+    let replacedPublicId = null;
+
+    if (req.file) {
+      try {
+        const result = await cloudinary.uploader.upload(getDataUri(req.file), {
+          folder: "top-cities",
+          quality: "auto",
+          fetch_format: "auto",
+        });
+        // Only destroy the previous asset once the new one is safely stored.
+        replacedPublicId = city.imagePublicId || null;
+        image = result.secure_url;
+        city.imagePublicId = result.public_id;
+      } catch (uploadError) {
+        console.error("Top city Cloudinary upload error:", uploadError);
+        return res.status(500).json({
+          success: false,
+          message: "Image upload failed",
+        });
+      }
+    } else if (requestedImage === "none") {
+      image = "";
+      city.imagePublicId = "";
+    } else if (requestedImage) {
+      image = requestedImage;
+    }
+
+    if (becomingTop && !image) {
+      return res.status(400).json({
+        success: false,
+        message: "A city image is required to mark it as a top city",
+      });
+    }
+
+    // Clear the flag if the photo goes away, so a top city is never imageless.
+    city.isTopCity = becomingTop && Boolean(image);
+    city.image = image;
     await state.save();
+
+    // Best-effort cleanup of the replaced asset. A failure here must not fail
+    // the request - the city is already saved with the new image.
+    if (replacedPublicId) {
+      try {
+        await cloudinary.uploader.destroy(replacedPublicId);
+      } catch (_) {
+        /* ignore cleanup errors */
+      }
+    }
 
     return res.status(200).json({
       success: true,

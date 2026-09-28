@@ -9,6 +9,23 @@ const citieSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  /**
+   * Home page tile image, stored as a Cloudinary URL.
+   *
+   * Required for a city to be shown as a top city: the image is the preview a
+   * visitor sees for that city's ads. Toggle it through
+   * POST /api/v1/location/admin/toggle-top-city, which uploads the file and
+   * writes the resulting URL here.
+   */
+  image: {
+    type: String,
+    default: "",
+  },
+  /** Cloudinary public_id of `image`, so a replacement can destroy the old asset. */
+  imagePublicId: {
+    type: String,
+    default: "",
+  },
   locations: [
     {
       name: {

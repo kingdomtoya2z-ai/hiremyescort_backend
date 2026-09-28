@@ -16,6 +16,7 @@ import {
   deleteLocation,
 } from "../controllers/statesCitiesController.js";
 import { isAdmin, isAuthenticated } from "../middleware/isAuthenticated.js";
+import { cityImageUpload, runUpload } from "../middleware/multer.js";
 
 const router = express.Router();
 
@@ -32,7 +33,13 @@ router.post("/admin/add-state", isAuthenticated, isAdmin, addState);
 router.post("/admin/add-city", isAuthenticated, isAdmin, addCityToState);
 router.post("/admin/add-location", isAuthenticated, isAdmin, addLocationToCity);
 router.post("/admin/update-seo", isAuthenticated, isAdmin, updateCitySEO);
-router.post("/admin/toggle-top-city", isAuthenticated, isAdmin, toggleTopCity);
+router.post(
+  "/admin/toggle-top-city",
+  isAuthenticated,
+  isAdmin,
+  runUpload(cityImageUpload),
+  toggleTopCity,
+);
 router.delete(
   "/admin/delete-state/:stateId",
   isAuthenticated,

@@ -13,6 +13,11 @@ export const multipleUpload = multer({ storage }).array('files', 4);
 //banner upload (single image, field name: "image")
 export const bannerUpload = multer({ storage }).single('image');
 
+// City tile image (single image, field name: "image") for
+// POST /api/v1/location/admin/toggle-top-city. Same field name as the banner
+// upload so the admin client can reuse one code path.
+export const cityImageUpload = multer({ storage }).single('image');
+
 // Wrap multer so the global 4-image cap and other upload errors return a clean
 // JSON 400 instead of crashing the request with a raw error/500.
 export const runUpload = (uploadMiddleware) => (req, res, next) => {
