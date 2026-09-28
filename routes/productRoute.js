@@ -41,8 +41,17 @@ router.get("/user/my-ads", isAuthenticated, getUserAdsForDashboard);
 //   &state=Andhra+Pradesh&adType=free&ageMin=18&ageMax=25&search=model
 router.get("/search", async (req, res) => {
   try {
-    const { category, city, location, state, adType, ageMin, ageMax, search } =
-      req.query;
+    const {
+      category,
+      city,
+      location,
+      state,
+      adType,
+      ageMin,
+      ageMax,
+      search,
+      hasPhotos,
+    } = req.query;
     const page = Math.max(Number(req.query.page) || 1, 1);
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
     const skip = (page - 1) * limit;
@@ -118,7 +127,13 @@ router.get("/search", async (req, res) => {
       filter.age = ageRange;
     }
 
-    // FILTER 6: Free-text keyword, over the fields a visitor would search.
+    // FILTER 6: Only ads carrying at least one photo. Server-side so the chip
+    // narrows the whole result set rather than the dozen already on screen.
+    if (String(hasPhotos) === "1") {
+      filter.productImg = { $exists: true, $nin: [] };
+    }
+
+    // FILTER 7: Free-text keyword, over the fields a visitor would search.
     const keyword = String(search || "").trim();
     if (keyword) {
       const safe = escapeRegex(keyword);
@@ -200,7 +215,17 @@ console.log(
       // Tells the client an anchored match found nothing and a looser one was
       // used, so it can avoid presenting the result as an exact city match.
       exactMatch: !usedLooseMatch,
-      filters: { category, state, city, location, adType, ageMin, ageMax, search },
+      filters: {
+        category,
+        state,
+        city,
+        location,
+        adType,
+        ageMin,
+        ageMax,
+        search,
+        hasPhotos,
+      },
     });
   } catch (error) {
     console.error("[Backend] Search error:", error);
