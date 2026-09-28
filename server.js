@@ -14,11 +14,25 @@ import startTokenCleanupJob, {
   startAdExpiryJob,
 } from "./utils/tokenScheduler.js";
 import { prerenderMiddleware } from "./middleware/prerenderMiddleware.js";
+import { generalLimiter } from "./middleware/rateLimiter.js";
 import { getPrerenderHtml } from "./controllers/seoController.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+
+/*
+ * Trust exactly one proxy hop.
+ *
+ * The app is served from behind Railway's reverse proxy, so without this every
+ * request reaches Express with the PROXY's address in `req.ip`. That silently
+ * broke all rate limiting: every visitor on the internet shared a single
+ * bucket, so five failed logins from one attacker locked out the whole site for
+ * 15 minutes. `1` is deliberate - trusting the whole chain (`true`) would let a
+ * client spoof `X-Forwarded-For` and pick its own rate-limit bucket, defeating
+ * the limiter entirely.
+ */
+app.set("trust proxy", 1);
 
 //middleware
 app.use(express.json());
@@ -27,6 +41,15 @@ app.use(cors());
 
 // Prerender middleware for bot traffic
 app.use(prerenderMiddleware);
+
+/*
+ * Baseline limiter for the whole API.
+ *
+ * The per-route limiters below are the real controls; this one exists so an
+ * unbounded client cannot take the public catalogue endpoints down. The limits
+ * are generous because that traffic is legitimate and mostly cached.
+ */
+app.use(generalLimiter);
 
 app.use("/api/v1/user", userRoute);
 app.use("/api/v1/product", productRoute);
