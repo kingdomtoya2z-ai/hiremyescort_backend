@@ -66,30 +66,58 @@ export const generalLimiter = rateLimit({
 });
 
 /**
- * Login: 10 per 15 minutes per IP.
+ * Failed sign-ins: 3 per 15 minutes per IP.
  *
- * `skipSuccessfulRequests` is the point. A shared NAT or office IP should not
- * be punished for one person's typos, and a real user who signs in correctly
- * gets their budget back. Only failures accumulate.
+ * `skipSuccessfulRequests` is essential at this limit, not a nicety. Without
+ * it a correct sign-in would spend an attempt, and a user who signs in three
+ * times in an afternoon would be locked out until the window expired. Only
+ * failures accumulate, so the budget is spent by guessing rather than by use.
+ *
+ * A correct password does count against the separate per-ACCOUNT budget in
+ * `ACCOUNT_WINDOWS.login`, which is what stops a distributed attack where every
+ * attempt comes from a different address.
  */
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 10,
+  /*
+   * Deliberately far above the 3-per-user rule.
+   *
+   * The limit that actually enforces "three tries" is the per-ACCOUNT budget in
+   * `ACCOUNT_WINDOWS.login`. This per-IP limit is a coarse brake on total
+   * volume, and it has to be generous: it is shared by everyone behind one
+   * address, which on a phone means the whole carrier NAT and in an office the
+   * whole building. At 3 it was measured doing exactly what it must not - one
+   * person failing three times locked out the unrelated person who dialled next.
+   * It is still low enough to stop a single host grinding through passwords.
+   */
+  limit: 20,
   standardHeaders: drafts,
   legacyHeaders: false,
   skipSuccessfulRequests: true,
   handler: reject(
-    "Too many sign-in attempts. Please wait 15 minutes and try again.",
+    "Too many failed sign-in attempts from this network. Please wait 15 minutes and try again.",
   ),
 });
 
-/** Registering is expensive (hash, email, OTP) and rarely retried legitimately. */
+/**
+ * Registrations: 3 per 15 minutes per IP, matching the sign-in limit.
+ *
+ * `skipSuccessfulRequests` for the same reason as login: a user who has to
+ * correct a password mismatch and resubmit should not be treated as an
+ * attacker, and a real registration must not consume the allowance that the
+ * next attempt needs.
+ */
 export const registerLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  limit: 5,
+  windowMs: 15 * 60 * 1000,
+  // Same reasoning as loginLimiter: the 3-per-user rule is enforced per
+  // account, so this stays generous enough not to punish a shared address.
+  limit: 20,
   standardHeaders: drafts,
   legacyHeaders: false,
-  handler: reject("Too many accounts created from this network. Try again later."),
+  skipSuccessfulRequests: true,
+  handler: reject(
+    "Too many sign-up attempts from this network. Please wait 15 minutes and try again.",
+  ),
 });
 
 /**
@@ -166,7 +194,13 @@ export const adLimiter = rateLimit({
  * already connected.
  */
 const ACCOUNT_WINDOWS = {
-  login: { windowMs: 15 * 60 * 1000, limit: 10 },
+  /*
+   * Kept in step with the per-IP limits above. These are a second, independent
+   * budget, so a botnet spreading one attack across thousands of addresses
+   * still only gets this many attempts at any single account.
+   */
+  login: { windowMs: 15 * 60 * 1000, limit: 3 },
+  register: { windowMs: 15 * 60 * 1000, limit: 3 },
   "otp-verify": { windowMs: 15 * 60 * 1000, limit: 10 },
   "otp-send": { windowMs: 60 * 60 * 1000, limit: 8 },
 };
@@ -194,7 +228,7 @@ sweeper.unref?.();
  * cannot be used to discover which emails are registered. The key is
  * lower-cased, so case variants of the same address share a budget.
  *
- * @param {"login"|"otp-verify"|"otp-send"} action
+ * @param {"login"|"register"|"otp-verify"|"otp-send"} action
  * @param {(req) => string} getAccount pulls the account identifier off the request
  */
 export function accountLimiter(action, getAccount) {
@@ -220,10 +254,20 @@ export function accountLimiter(action, getAccount) {
 
     entry.count += 1;
 
+    /*
+     * Own header namespace, deliberately not `RateLimit-*`.
+     *
+     * express-rate-limit writes the standard names on the IP limiter that runs
+     * straight after this one. Using the same names meant whichever ran last won
+     * the header, so a 429 caused by the per-IP limit could report the
+     * per-ACCOUNT remaining count, and vice versa - a response whose numbers
+     * describe a limit that was not the one that blocked it. Two independent
+     * budgets need two independent names.
+     */
     const remaining = Math.max(limit - entry.count, 0);
-    res.setHeader("RateLimit-Limit", limit);
-    res.setHeader("RateLimit-Remaining", remaining);
-    res.setHeader("RateLimit-Reset", Math.ceil(entry.resetAt / 1000));
+    res.setHeader("X-RateLimit-Account-Limit", limit);
+    res.setHeader("X-RateLimit-Account-Remaining", remaining);
+    res.setHeader("X-RateLimit-Account-Reset", Math.ceil(entry.resetAt / 1000));
 
     if (entry.count > limit) {
       const minutes = Math.max(1, Math.ceil((entry.resetAt - now) / 60000));

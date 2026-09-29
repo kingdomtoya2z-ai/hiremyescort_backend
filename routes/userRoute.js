@@ -54,7 +54,12 @@ const router = express.Router();
 const emailFromBody = (req) => req.body?.email;
 const emailFromPath = (req) => req.params?.email;
 
-router.post("/register", registerLimiter, register);
+router.post(
+  "/register",
+  accountLimiter("register", emailFromBody),
+  registerLimiter,
+  register,
+);
 router.post("/verify", otpVerifyLimiter, verify);
 router.post("/reverify", accountLimiter("otp-send", emailFromBody), otpSendLimiter, reVerify);
 router.post("/login", accountLimiter("login", emailFromBody), loginLimiter, login);

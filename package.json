@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node --max-old-space-size=1024 server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "test": "node tests/coinSafety.test.js"
   },
   "author": "",
   "license": "ISC",

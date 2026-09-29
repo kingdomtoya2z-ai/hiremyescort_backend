@@ -916,6 +916,44 @@ export const rejectAd = async (req, res) => {
       });
     }
 
+    /*
+     * An ad that ran out its validity period is NEVER refundable.
+     *
+     * The expiry job moves ads to `rejected` but deliberately does not refund -
+     * the coins were spent on a month of visibility that was used. It leaves
+     * `coinsRefunded` false, because nothing was refunded.
+     *
+     * That made the guard above a hole: it only short-circuits when
+     * `coinsRefunded` is true, so calling this endpoint on an expired ad fell
+     * straight through and paid out. There are 1,312 such ads in the database
+     * right now, so any of them could be refunded - by an admin clicking reject
+     * on an ad they thought was still live, or by anyone who can reach this
+     * endpoint.
+     *
+     * Rejecting an expired ad is still allowed - an admin may want to record a
+     * reason - it just cannot move coins.
+     */
+    if (ad.isExpired) {
+      const updatedExpiredAd = await Product.findByIdAndUpdate(
+        adId,
+        {
+          status: "rejected",
+          isExpired: true,
+          coinsRefunded: false,
+          ...(reason ? { rejectReason: reason } : {}),
+        },
+        { new: true },
+      );
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Advertisement had already expired. No coins were refunded - expiry is not a refundable event.",
+        ad: updatedExpiredAd,
+        refundedCoins: 0,
+      });
+    }
+
     // Refund coins if ad is paid (golden or premium)
     const coinCosts = {
       free: 0,
