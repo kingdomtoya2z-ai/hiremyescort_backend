@@ -59,11 +59,17 @@ export const getExpiryLabel = (adType) =>
   AD_EXPIRY_LABEL[normalizeAdType(adType)] ?? AD_EXPIRY_LABEL.premium;
 
 /**
- * Only premium ads carry contact details. Free and golden ads are listed
- * without a way to reach the advertiser, so the fields are removed on the way in
- * rather than merely hidden on the way out.
+ * Ad types that carry contact details: Golden and Premium.
+ *
+ * Free ads are listed without any way to reach the advertiser, so their fields
+ * are removed on the way in rather than merely hidden on the way out.
+ *
+ * Contact is a per-page decision, not a per-type one: both types that hold a
+ * number show the call and WhatsApp buttons on the ad's own profile, and
+ * neither shows them in a listing. A listing is a comparison surface, so the
+ * buttons live where a visitor has already picked one ad.
  */
-export const ALLOWED_CONTACT_TYPES = ["premium"];
+export const ALLOWED_CONTACT_TYPES = ["golden", "premium"];
 
 export const allowsContact = (adType) =>
   ALLOWED_CONTACT_TYPES.includes(normalizeAdType(adType));

@@ -5,7 +5,7 @@
  * on the client:
  *
  *   - photo allowance   free 0 · golden 2 · premium 4
- *   - contact details   premium only, and stripped on the way in
+ *   - contact details   golden + premium; stripped on the way in for free
  *   - lifetime          free 24 hours · golden 4 days · premium 1 week,
  *                       counted from approval
  *   - free-ad quota     one live free ad per account
@@ -63,8 +63,19 @@ eq("missing type fails closed to free", getMaxImagesForAdType(undefined), 0);
  * ------------------------------------------------------------------ */
 console.log("\nContact rules:");
 eq("free carries no contact", allowsContact("free"), false);
-eq("golden carries no contact", allowsContact("golden"), false);
+eq("golden carries contact", allowsContact("golden"), true);
 eq("premium carries contact", allowsContact("premium"), true);
+
+/*
+ * Where the buttons appear is separate from whether the ad holds a number.
+ * Golden stores a contact and shows call/WhatsApp on its own profile, but a
+ * listing row renders no contact action for any type. ContactActions and
+ * StickyContactBar are both profile-page components, so allowing golden here
+ * cannot leak a button into a listing.
+ */
+check("listings carry no contact buttons for any type",
+  !/CallButton|WhatsAppButton/.test(read("../frontend-next/src/components/ads/AdCard.jsx").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")),
+  "AdCard must not render a contact action");
 
 /* ------------------------------------------------------------------ *
  * 3. Lifetime, measured from approval
@@ -120,12 +131,14 @@ const controller = read("controllers/productController.js");
 
 check("add: duplicate check runs", /findDuplicateAd\(\s*userId/.test(controller),
   "posting without the duplicate check would let a user re-post the same ad");
-check("add: contact stripped for non-premium", /allowsContact\(adType\)/.test(controller),
-  "hiding contact in the UI is not enough; the number must not be stored");
+check("add: contact stripped for free ads", /allowsContact\(adType\)/.test(controller),
+  "hiding contact in the UI is not enough; a free ad's number must not be stored");
 check("add: image cap enforced", /getMaxImagesForAdType\(adType\)/.test(controller));
 check("update: duplicate check runs", /findDuplicateAd\(\s*\n?\s*product\.userId/.test(controller),
   "otherwise the same copy can be duplicated by editing instead of posting");
-check("update: contact cleared on downgrade", /keepsContact\s*\?\s*\(whatsapp/.test(controller));
+check("update: contact cleared when downgraded to free",
+  /keepsContact\s*\?\s*\(whatsapp/.test(controller),
+  "downgrading to free must drop the stored numbers, not just hide them");
 check("approval uses the shared expiry helper",
   /expiryDate = calculateExpiryDate\(/.test(controller),
   "a local copy of the window is how the two copies drifted apart before");
@@ -155,7 +168,7 @@ for (const [label, pattern] of [
   ["free photo cap", /free:\s*0/],
   ["golden photo cap", /golden:\s*2/],
   ["premium photo cap", /premium:\s*4/],
-  ["premium-only contact", /CONTACT_TYPES\s*=\s*\["premium"\]/],
+  ["golden and premium contact", /CONTACT_TYPES\s*=\s*\[[^\]]*"golden"[^\]]*\]/],
   ["free-ad quota", /FREE_AD_LIMIT\s*=\s*1/],
   ["expiry labels", /free:\s*"24 hours"/],
 ]) {
