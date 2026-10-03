@@ -1,24 +1,7 @@
 import { Product } from "../models/productModel.js";
 import { User } from "../models/userModel.js";
 import { sendAdExpiryMail } from "../emailVerify/sendAdStatusMail.js";
-
-// Calculate expiry date based on ad type
-const calculateExpiryDate = (adType, approvalDate) => {
-  const expiryDate = new Date(approvalDate);
-
-  if (adType === "premium") {
-    // 1 month = 30 days for premium
-    expiryDate.setDate(expiryDate.getDate() + 30);
-  } else if (adType === "golden") {
-    // 3 weeks = 21 days for golden
-    expiryDate.setDate(expiryDate.getDate() + 21);
-  } else {
-    // 2 weeks = 14 days for free
-    expiryDate.setDate(expiryDate.getDate() + 14);
-  }
-
-  return expiryDate;
-};
+import { getExpiryLabel } from "./adValidation.js";
 
 // Main function to check and expire ads
 export const createCheckAndExpireAds = () => {
@@ -42,7 +25,12 @@ export const createCheckAndExpireAds = () => {
 
       for (const ad of approvedAds) {
         try {
-          // Update ad status to rejected
+          /**
+           * Mark the ad expired. No coins are returned here and no
+           * CoinTransaction is written: reaching the end of its paid window is
+           * not a refundable event. Only an admin rejecting an ad refunds, which
+           * is handled in rejectAd and is a separate path.
+           */
           const updatedAd = await Product.findByIdAndUpdate(
             ad._id,
             {
@@ -58,14 +46,7 @@ export const createCheckAndExpireAds = () => {
           const user = await User.findById(ad.userId);
           if (user && user.email) {
             try {
-              // Get ad type expiry info
-              const expiryInfo = {
-                free: "2 weeks",
-                golden: "3 weeks",
-                premium: "1 month",
-              };
-
-              const expiryPeriod = expiryInfo[ad.adType] || "validity period";
+              const expiryPeriod = getExpiryLabel(ad.adType);
 
               await sendAdExpiryMail(
                 user.email,

@@ -5,9 +5,14 @@ import cloudinary from "../utils/cloudinary.js";
 import getDataUri from "../utils/dataUri.js";
 import {
   FREE_AD_LIMIT,
+  DUPLICATE_MESSAGE,
+  allowsContact,
   countActiveFreeAds,
+  findDuplicateAd,
   getMaxImagesForAdType,
+  normalizeAdType,
   validateAdText,
+  calculateExpiryDate,
 } from "../utils/adValidation.js";
 
 import {
@@ -106,6 +111,25 @@ export const addProduct = async (req, res) => {
       return res.status(400).json({ success: false, message: textError });
     }
 
+    // Only premium ads carry contact details. Free and golden drop them here so
+    // the numbers are never written to the database, rather than being stored
+    // and merely hidden in the UI.
+    adType = normalizeAdType(adType);
+    if (!allowsContact(adType)) {
+      whatsapp = "";
+      contact = "";
+    }
+
+    // One account cannot run the same ad twice.
+    const duplicate = await findDuplicateAd(userId, { title, about });
+    if (duplicate) {
+      return res.status(400).json({
+        success: false,
+        message: DUPLICATE_MESSAGE,
+        duplicateReason: duplicate.reason,
+      });
+    }
+
     // Coin costs for ad types
     const coinCosts = {
       free: 0,
@@ -121,17 +145,20 @@ export const addProduct = async (req, res) => {
       if (freeCount >= FREE_AD_LIMIT) {
         return res.status(400).json({
           success: false,
-          message: `You can only have ${FREE_AD_LIMIT} free ads. Please delete or upgrade one of your existing free ads before posting another.`,
+          message: `You can only have ${FREE_AD_LIMIT} free ad. Please delete or upgrade your existing free ad before posting another.`,
         });
       }
     }
 
-    // Image limit by ad type (free=1, golden/premium=4)
+    // Image limit by ad type (free=0, golden=2, premium=4)
     const maxImages = getMaxImagesForAdType(adType);
     if (req.files && req.files.length > maxImages) {
       return res.status(400).json({
         success: false,
-        message: `Maximum ${maxImages} image${maxImages > 1 ? "s" : ""} allowed for ${adType} ads.`,
+        message:
+          maxImages === 0
+            ? `Free ads cannot include photos. Remove the image${req.files.length > 1 ? "s" : ""} and post again.`
+            : `Maximum ${maxImages} image${maxImages > 1 ? "s" : ""} allowed for ${adType} ads.`,
       });
     }
 
@@ -455,7 +482,28 @@ export const updateProduct = async (req, res) => {
     }
 
     // Target ad type (final type after this update)
-    const newAdType = adType ?? product.adType;
+    const newAdType = normalizeAdType(adType ?? product.adType);
+
+    // Only premium ads keep contact details, so downgrading a premium ad to
+    // free or golden clears the numbers rather than leaving them stored on a
+    // page that no longer renders them.
+    const keepsContact = allowsContact(newAdType);
+    const nextWhatsapp = keepsContact ? (whatsapp ?? product.whatsapp) : "";
+    const nextContact = keepsContact ? (contact ?? product.contact) : "";
+
+    // The same duplicate rule as posting, ignoring this ad's own row.
+    const duplicate = await findDuplicateAd(
+      product.userId,
+      { title: title ?? product.title, about: about ?? product.about },
+      productId,
+    );
+    if (duplicate) {
+      return res.status(400).json({
+        success: false,
+        message: DUPLICATE_MESSAGE,
+        duplicateReason: duplicate.reason,
+      });
+    }
 
     // Free ads: a user can have at most FREE_AD_LIMIT at once (excluding this ad)
     if (newAdType === "free") {
@@ -463,18 +511,23 @@ export const updateProduct = async (req, res) => {
       if (freeCount >= FREE_AD_LIMIT) {
         return res.status(400).json({
           success: false,
-          message: `You can only have ${FREE_AD_LIMIT} free ads. Please delete or upgrade one of your existing free ads before switching this ad to free.`,
+          message: `You can only have ${FREE_AD_LIMIT} free ad. Please delete or upgrade one of your existing free ads before switching this ad to free.`,
         });
       }
     }
 
-    // Image limit by target ad type (free=1, golden/premium=4)
+    // Image limit by target ad type (free=0, golden=2, premium=4)
     const maxImages = getMaxImagesForAdType(newAdType);
+    const imageLimitMessage = (kept, adding) =>
+      maxImages === 0
+        ? `${newAdType === "free" ? "Free" : newAdType} ads cannot include photos. Remove the photo${kept + adding > 1 ? "s" : ""} and save again.`
+        : `Maximum ${maxImages} image${maxImages > 1 ? "s" : ""} allowed for ${newAdType} ads${kept + adding > 0 ? ` (you have ${kept} saved and are adding ${adding})` : ""}.`;
+
     const incomingFiles = req.files?.length || 0;
     if (incomingFiles > maxImages) {
       return res.status(400).json({
         success: false,
-        message: `Maximum ${maxImages} image${maxImages > 1 ? "s" : ""} allowed for ${newAdType} ads.`,
+        message: imageLimitMessage(0, incomingFiles),
       });
     }
 
@@ -498,6 +551,13 @@ export const updateProduct = async (req, res) => {
       }
     }
 
+    // A free ad carries no photos, so downgrading one drops whatever it had
+    // instead of failing the save with "free ads cannot include photos" on the
+    // user's own earlier images.
+    if (maxImages === 0) {
+      keepIds = [];
+    }
+
     const keptImages = updatedImages.filter((img) =>
       keepIds.includes(img.public_id),
     );
@@ -505,7 +565,7 @@ export const updateProduct = async (req, res) => {
     if (keptImages.length + incomingFiles > maxImages) {
       return res.status(400).json({
         success: false,
-        message: `Maximum ${maxImages} image${maxImages > 1 ? "s" : ""} allowed for ${newAdType} ads (you have ${keptImages.length} saved and are adding ${incomingFiles}).`,
+        message: imageLimitMessage(keptImages.length, incomingFiles),
       });
     }
 
@@ -631,8 +691,8 @@ export const updateProduct = async (req, res) => {
     // UPDATE FIELDS
     // ---------------------------
     product.title = title ?? product.title;
-    product.whatsapp = whatsapp ?? product.whatsapp;
-    product.contact = contact ?? product.contact;
+    product.whatsapp = nextWhatsapp;
+    product.contact = nextContact;
     product.gender = gender ?? product.gender;
     product.services = services ?? product.services;
 
@@ -825,24 +885,9 @@ export const approveAd = async (req, res) => {
       );
     }
 
-    // Calculate expiry date based on ad type
-    const calculateExpiryDate = (adType, approvalDate) => {
-      const expiryDate = new Date(approvalDate);
-
-      if (adType === "premium") {
-        // 1 month = 30 days for premium
-        expiryDate.setDate(expiryDate.getDate() + 30);
-      } else if (adType === "golden") {
-        // 3 weeks = 21 days for golden
-        expiryDate.setDate(expiryDate.getDate() + 21);
-      } else {
-        // 2 weeks = 14 days for free
-        expiryDate.setDate(expiryDate.getDate() + 14);
-      }
-
-      return expiryDate;
-    };
-
+    // Expiry is measured from approval, using the shared per-type window
+    // (free 24 hours, golden 4 days, premium 1 week) rather than a local copy
+    // that could drift from the expiry checker's.
     const approvalDate = new Date();
     const expiryDate = calculateExpiryDate(ad.adType, approvalDate);
 

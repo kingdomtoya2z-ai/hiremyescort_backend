@@ -10,6 +10,12 @@ import { setTokenExpiry } from "../utils/tokenManager.js";
 import { sendDeleteEmail } from "../emailVerify/sendAdStatusMail.js";
 import { ensureString, ensureNumber } from "../utils/sanitize.js";
 
+/**
+ * Coins granted once, when an account is created. Enough for one golden ad, so
+ * a new member can post a paid ad without buying a pack first.
+ */
+export const NEW_USER_WELCOME_COINS = 100;
+
 export const register = async (req, res) => {
   try {
     const { firstName, lastName, email, password, phoneNo } = req.body;
@@ -48,7 +54,7 @@ export const register = async (req, res) => {
       email,
       phoneNo: sanitizedPhone,
       password: hashedPassword,
-      coins: 1000, // Award 1000 free coins to new users
+      coins: NEW_USER_WELCOME_COINS, // one-time welcome coins, granted only at signup
     });
     const token = jwt.sign({ id: newUser._id }, process.env.SECRET_KEY, {
       expiresIn: "10m",

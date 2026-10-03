@@ -3,8 +3,8 @@
  *
  * The rule under test: **an ad that expires must never refund coins.**
  *
- * The coins bought a fixed window of visibility - 30 days premium, 21 golden,
- * 14 free - and that window was used. Expiry is the natural end of the
+ * The coins bought a fixed window of visibility - 7 days premium, 4 golden,
+ * 24 hours free - and that window was used. Expiry is the natural end of the
  * transaction, not a failure of it, so there is nothing to give back.
  *
  * This exists as a test rather than a comment because the invariant is easy to
@@ -47,10 +47,67 @@ const FORBIDDEN = [
   /User\.updateOne/,
   /\$inc/,
 ];
+
+/**
+ * Only executable code can move a balance, so the scan runs against the source
+ * with its comments removed. Without this the test also fails on prose - the
+ * expiry job is exactly where a comment explaining *why* no refund happens
+ * belongs, and silencing that comment to satisfy a grep loses the reasoning.
+ *
+ * Quote-aware, so a `//` inside a string literal (a URL, say) is not mistaken
+ * for the start of a comment and the code after it is not silently dropped.
+ */
+const stripComments = (src) => {
+  let out = "";
+  let quote = null;
+
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    const next = src[i + 1];
+
+    if (quote) {
+      out += ch;
+      if (ch === "\\") {
+        out += next ?? "";
+        i += 1;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+
+    if (ch === "/" && next === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end === -1 ? src.length : end + 1;
+      out += " ";
+      continue;
+    }
+
+    if (ch === "/" && next === "/") {
+      const end = src.indexOf("\n", i);
+      i = end === -1 ? src.length : end;
+      out += " ";
+      continue;
+    }
+
+    out += ch;
+  }
+
+  return out;
+};
+
+const expiryCode = stripComments(expiry);
+
 for (const pattern of FORBIDDEN) {
   check(
     `contains no ${pattern}`,
-    !pattern.test(expiry),
+    !pattern.test(expiryCode),
     `matched ${pattern} - the expiry job must never touch a coin balance`,
   );
 }
