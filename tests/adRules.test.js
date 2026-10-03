@@ -31,6 +31,12 @@ import {
   similarity,
 } from "../utils/adValidation.js";
 
+/* The client mirror is plain ESM with no dependencies, so it imports directly. */
+const clientRules = await import(
+  new URL("../../frontend-next/src/lib/adRules.js", import.meta.url).href
+);
+const { showsListingContact, forListing } = clientRules;
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(join(root, p), "utf8");
 
@@ -67,15 +73,37 @@ eq("golden carries contact", allowsContact("golden"), true);
 eq("premium carries contact", allowsContact("premium"), true);
 
 /*
- * Where the buttons appear is separate from whether the ad holds a number.
- * Golden stores a contact and shows call/WhatsApp on its own profile, but a
- * listing row renders no contact action for any type. ContactActions and
- * StickyContactBar are both profile-page components, so allowing golden here
- * cannot leak a button into a listing.
+ * Where the buttons appear is separate from whether the ad holds a number, and
+ * the two rules are deliberately different. Golden stores a contact and shows
+ * call/WhatsApp on its own profile, but a listing row advertises only Premium.
  */
-check("listings carry no contact buttons for any type",
-  !/CallButton|WhatsAppButton/.test(read("../frontend-next/src/components/ads/AdCard.jsx").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "")),
-  "AdCard must not render a contact action");
+eq("free shows no listing buttons", showsListingContact("free"), false);
+eq("golden shows no listing buttons", showsListingContact("golden"), false);
+eq("premium shows listing buttons", showsListingContact("premium"), true);
+
+/*
+ * The listing must not ship a number it is not going to render. `RefinedAdGrid`
+ * is a client component, so Next serialises every prop into the RSC payload in
+ * the HTML: a Golden number with no button on the row would still be published
+ * in the page source. `forListing` keeps contact for Premium only.
+ */
+const stripped = forListing({ _id: "1", adType: "golden", contact: "999", whatsapp: "999", title: "t" });
+check("listing payload drops a golden number", stripped.contact === undefined && stripped.whatsapp === undefined,
+  "a golden phone number would be readable in the listing HTML");
+check("listing payload drops a free number",
+  forListing({ adType: "free", contact: "999", whatsapp: "999" }).contact === undefined);
+const keptPremium = forListing({ _id: "2", adType: "premium", contact: "999", whatsapp: "888" });
+eq("listing payload keeps a premium number", [keptPremium.contact, keptPremium.whatsapp], ["999", "888"]);
+eq("listing payload preserves other fields", forListing({ _id: "3", adType: "golden", title: "keep me" }).title, "keep me");
+
+const card = read("../frontend-next/src/components/ads/AdCard.jsx");
+check("listing row gates its buttons on the listing rule",
+  /showsListingContact\(product\.adType\)/.test(card),
+  "AdCard must gate on showsListingContact, not allowsContact");
+const listing = read("../frontend-next/src/components/ads/AdListing.jsx");
+check("listing strips contact before it reaches the client component",
+  /forListingAll\(products\)/.test(listing),
+  "whole products would put every non-premium number in the RSC payload");
 
 /* ------------------------------------------------------------------ *
  * 3. Lifetime, measured from approval
@@ -159,20 +187,20 @@ check("welcome coins granted only at signup",
  * 7. Client mirror
  * ------------------------------------------------------------------ */
 console.log("\nClient mirror (frontend-next/src/lib/adRules.js):");
-const clientRules = readFileSync(
+const clientRulesSource = readFileSync(
   join(root, "..", "frontend-next", "src", "lib", "adRules.js"),
   "utf8",
 );
-
 for (const [label, pattern] of [
   ["free photo cap", /free:\s*0/],
   ["golden photo cap", /golden:\s*2/],
   ["premium photo cap", /premium:\s*4/],
   ["golden and premium contact", /CONTACT_TYPES\s*=\s*\[[^\]]*"golden"[^\]]*\]/],
+  ["premium-only listing buttons", /LISTING_CONTACT_TYPES\s*=\s*\["premium"\]/],
   ["free-ad quota", /FREE_AD_LIMIT\s*=\s*1/],
   ["expiry labels", /free:\s*"24 hours"/],
 ]) {
-  check(`${label} mirrored on the client`, pattern.test(clientRules),
+  check(`${label} mirrored on the client`, pattern.test(clientRulesSource),
     "the client mirror drifted from the backend rule");
 }
 
