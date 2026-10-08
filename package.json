@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node --max-old-space-size=1024 server.js",
     "dev": "nodemon server.js",
-    "test": "node tests/coinSafety.test.js && node tests/adRules.test.js"
+    "test": "node tests/coinSafety.test.js && node tests/adRules.test.js",
+    "test:overdraft": "node tests/coinOverdraft.test.js",
+    "audit:coins": "node scripts/audit-coins.js"
   },
   "author": "",
   "license": "ISC",

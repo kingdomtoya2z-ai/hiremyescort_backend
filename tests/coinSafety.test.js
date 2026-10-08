@@ -134,13 +134,13 @@ check(
   "without this guard an expired ad pays out, because the expiry job leaves coinsRefunded false",
 );
 check(
-  "guard appears BEFORE the $inc refund",
-  rejectBody.indexOf("ad.isExpired") < rejectBody.indexOf("$inc"),
+  "guard appears BEFORE the refund",
+  rejectBody.indexOf("ad.isExpired") < rejectBody.indexOf("addCoins("),
   "a guard placed after the refund does nothing",
 );
 check(
   "still refunds a live paid ad",
-  /\$inc:\s*\{\s*coins:\s*refundAmount\s*\}/.test(rejectBody),
+  /addCoins\(\s*ad\.userId\s*,\s*refundAmount\s*\)/.test(rejectBody),
   "manual rejection of a genuinely live paid ad must keep refunding",
 );
 
@@ -178,39 +178,72 @@ for (const [label, ad, expected] of cases) {
  * 4. No other automatic path can refund
  * ------------------------------------------------------------------ */
 console.log("\nOther balance-increasing sites:");
-const files = ["controllers/productController.js", "controllers/paymentController.js", "controllers/userController.js"];
+/*
+ * utils/coinLedger.js is included because the rejection refund now goes through
+ * addCoins() there rather than spelling out its own $inc. That move is the point
+ * of the file - one audited place to write a balance - so it has to stay inside
+ * this audit rather than escaping it.
+ */
+const files = [
+  "controllers/productController.js",
+  "controllers/paymentController.js",
+  "controllers/userController.js",
+  "utils/coinLedger.js",
+];
 const all = files.map(read).join("\n");
-const sites = [...all.matchAll(/\$inc:\s*\{\s*coins:\s*([^}]+)\}|user\.coins\s*\+=/g)].map(
-  (m) => m[1]?.trim() || "manual top-up",
+/*
+ * Each site is recorded with the file it lives in. An audit that only knows the
+ * expression text cannot tell a refund from a top-up when both read `value`, and
+ * "somebody added a fifth write" is only actionable if the report says where.
+ */
+const sites = files.flatMap((file) =>
+  [...read(file).matchAll(/\$inc:\s*\{\s*coins:\s*([^}]+)\}|user\.coins\s*\+=/g)].map(
+    (m) => ({ file, expr: m[1]?.trim() || "manual top-up" }),
+  ),
 );
 /*
- * Every write to a coin balance, in either direction.
+ * Every write to a coin balance, in either direction, is one of a known set.
  *
- * Decreases are spending, not refunding: `-coinsNeeded` is the ad being paid
- * for. Increases are the only paths that can give coins back, and there must be
- * exactly three of them - the manual rejection refund, a verified payment, and
- * the admin top-up - none of which expiry can reach.
+ * Decreases are spending, not refunding. Increases are the only paths that can
+ * give coins back, and there must be exactly three: the rejection refund (now
+ * `addCoins` in utils/coinLedger.js), a verified payment, and the admin top-up.
+ * None of them is reachable by expiry.
  */
-const INCREASES = ["refundAmount", "coins", "manual top-up"];
-const DECREASES = ["-coinsNeeded", "coins;"];
+const KNOWN = new Map([
+  ["utils/coinLedger.js:value", "increase: rejection refund via addCoins"],
+  ["utils/coinLedger.js:-value", "decrease: every spend via spendCoins"],
+  ["controllers/paymentController.js:coins", "increase: verified payment"],
+  ["controllers/userController.js:manual top-up", "increase: admin top-up"],
+]);
 
-const increases = sites.filter((s) => INCREASES.includes(s.replace(/;$/, "")));
-const decreases = sites.filter((s) => DECREASES.includes(s.replace(/;$/, "")));
-const unknown = sites.filter((s) => !INCREASES.includes(s.replace(/;$/, "")) && !DECREASES.includes(s.replace(/;$/, "")));
+const label = (s) => KNOWN.get(`${s.file}:${s.expr.replace(/;$/, "")}`);
+const increases = sites.filter((s) => label(s)?.startsWith("increase"));
+const decreases = sites.filter((s) => label(s)?.startsWith("decrease"));
+const unknown = sites.filter((s) => !label(s));
 
 check(
-  `exactly 3 places increase a balance (found ${increases.length}: ${increases.join(", ")})`,
+  `exactly 3 places increase a balance (found ${increases.length})`,
   increases.length === 3,
   `an unrecognised balance increase is a refund path nobody has audited`,
 );
 check(
   `every balance write is a known site (${sites.length} total)`,
   unknown.length === 0,
-  `unrecognised: ${unknown.join(", ")}`,
+  `unrecognised: ${unknown.map((s) => `${s.file} -> ${s.expr}`).join(", ")}`,
+);
+check(
+  "all coin writes live in coinLedger.js except the two audited credits",
+  sites.every(
+    (s) =>
+      s.file === "utils/coinLedger.js" ||
+      label(s) === "increase: verified payment" ||
+      label(s) === "increase: admin top-up",
+  ),
+  "a controller writing a balance directly can overwrite a concurrent one",
 );
 check(
   "the manual rejection refund is the only refund tied to an ad",
-  read("controllers/productController.js").includes("coins: refundAmount"),
+  read("controllers/productController.js").includes("addCoins(ad.userId, refundAmount)"),
 );
 check(
   "expiry never appears in a coin increase",

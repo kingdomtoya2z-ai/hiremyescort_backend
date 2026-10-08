@@ -4,6 +4,12 @@ import { CoinTransaction } from "../models/coinTransactionModel.js";
 import cloudinary from "../utils/cloudinary.js";
 import getDataUri from "../utils/dataUri.js";
 import {
+  addCoins,
+  getBalance,
+  insufficientCoinsMessage,
+  spendCoins,
+} from "../utils/coinLedger.js";
+import {
   FREE_AD_LIMIT,
   DUPLICATE_MESSAGE,
   allowsContact,
@@ -162,16 +168,17 @@ export const addProduct = async (req, res) => {
       });
     }
 
-    // Check if user has enough coins for paid ads
-    if (adType !== "free") {
-      console.log("💰 Checking coins for", adType, "ad");
-
-      if (user.coins < coinsNeeded) {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient coins. You need ${coinsNeeded} coins for a ${adType} ad. You have ${user.coins} coins.`,
-        });
-      }
+    /*
+     * Advisory pre-check only, for a fast, friendly error before any upload.
+     * It is NOT the guard: between here and the deduction below sits the whole
+     * Cloudinary round-trip, so this value is already stale by the time it
+     * would matter. spendCoins is what actually prevents an overdraft.
+     */
+    if (adType !== "free" && user.coins < coinsNeeded) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient coins. You need ${coinsNeeded} coins for a ${adType} ad. You have ${user.coins} coins.`,
+      });
     }
 
     // Handle multiple image uploads FIRST (before deducting coins)
@@ -225,14 +232,40 @@ export const addProduct = async (req, res) => {
         }
       }
     }
-    // NOW deduct coins ONLY after successful image upload
+    /**
+     * NOW deduct coins, after the images are safely uploaded.
+     *
+     * `spendCoins` performs the affordability check and the decrement in one
+     * atomic update. The earlier check was advisory only — it cannot be the real
+     * guard, because it runs before the upload above, so for the whole duration
+     * of the Cloudinary round-trip another request can spend the same coins.
+     * Two requests arriving together used to both pass that check and both
+     * deduct, which is how an account ends up at a negative balance holding an
+     * ad it never paid for.
+     */
     let updatedUser = null;
-    if (adType !== "free") {
-      updatedUser = await User.findByIdAndUpdate(
-        userId,
-        { $inc: { coins: -coinsNeeded } },
-        { new: true },
-      );
+    if (adType !== "free" && coinsNeeded > 0) {
+      updatedUser = await spendCoins(userId, coinsNeeded);
+
+      if (!updatedUser) {
+        // Lost the race (or the balance was never there). Do not create the ad,
+        // and do not leave the images we just uploaded orphaned in Cloudinary.
+        await Promise.all(
+          productImg.map((img) =>
+            cloudinary.uploader
+              .destroy(img.public_id)
+              .catch((err) =>
+                console.error("Cloudinary cleanup error:", err.message),
+              ),
+          ),
+        );
+
+        const coins = await getBalance(userId);
+        return res.status(400).json({
+          success: false,
+          message: insufficientCoinsMessage(coinsNeeded, coins, adType),
+        });
+      }
 
       // Send email to user about coin deduction
     }
@@ -658,12 +691,20 @@ export const updateProduct = async (req, res) => {
         });
       }
 
-      // Deduct coins for resubmission
-      updatedUser = await User.findByIdAndUpdate(
-        userId,
-        { $inc: { coins: -coinsNeeded } },
-        { new: true },
-      );
+      // Deduct coins for resubmission. Atomic, so two concurrent edits cannot
+      // both spend the same balance.
+      updatedUser = await spendCoins(userId, coinsNeeded);
+
+      if (!updatedUser) {
+        return res.status(400).json({
+          success: false,
+          message: insufficientCoinsMessage(
+            coinsNeeded,
+            await getBalance(userId),
+            newAdType,
+          ),
+        });
+      }
 
       console.log(
         `💳 Deducted ${coinsNeeded} coins for ${newAdType} ad resubmission. New balance: ${updatedUser.coins}`,
@@ -877,11 +918,26 @@ export const approveAd = async (req, res) => {
         });
       }
 
-      // Deduct coins from user
-      user.coins -= requiredCoins;
-      await user.save();
+      // Deduct coins from user.
+      //
+      // This used to be `user.coins -= requiredCoins; await user.save()`, which
+      // is worse than a plain race: save() writes the WHOLE document as it was
+      // read, so a concurrent $inc from a new ad can be silently overwritten and
+      // the deduction lost — which then lets the user keep spending coins they no
+      // longer have. The atomic conditional update cannot lose an update.
+      const charged = await spendCoins(ad.userId, requiredCoins);
+
+      if (!charged) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient coins. User has ${await getBalance(ad.userId)} coins but ${requiredCoins} required to re-approve this ${ad.adType} ad`,
+          userCoins: await getBalance(ad.userId),
+          requiredCoins: requiredCoins,
+        });
+      }
+
       console.log(
-        `✅ Deducted ${requiredCoins} coins from user ${ad.userId} on re-approval. New balance: ${user.coins}`,
+        `✅ Deducted ${requiredCoins} coins from user ${ad.userId} on re-approval. New balance: ${charged.coins}`,
       );
     }
 
@@ -1011,12 +1067,9 @@ export const rejectAd = async (req, res) => {
     let refundedAmount = 0;
 
     if (refundAmount > 0) {
-      // Refund coins to user
-      updatedUser = await User.findByIdAndUpdate(
-        ad.userId,
-        { $inc: { coins: refundAmount } },
-        { new: true },
-      );
+      // Refund coins to user. Atomic so a concurrent deduction is not clobbered
+      // by a whole-document write.
+      updatedUser = await addCoins(ad.userId, refundAmount);
       refundedAmount = refundAmount;
     }
 

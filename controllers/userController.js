@@ -9,6 +9,7 @@ import { Product } from "../models/productModel.js";
 import { setTokenExpiry } from "../utils/tokenManager.js";
 import { sendDeleteEmail } from "../emailVerify/sendAdStatusMail.js";
 import { ensureString, ensureNumber } from "../utils/sanitize.js";
+import { getBalance, spendCoins } from "../utils/coinLedger.js";
 
 /**
  * Coins granted once, when an account is created. Enough for one golden ad, so
@@ -694,17 +695,27 @@ export const deductCoins = async (req, res) => {
       });
     }
 
-    user.coins -= coins;
-    await user.save();
+    // Atomic: the balance check and the decrement are one operation, so a
+    // concurrent ad post cannot spend the same coins between them. The previous
+    // `user.coins -= coins; await user.save()` also wrote back the whole stale
+    // document, which could silently discard a concurrent deduction.
+    const updated = await spendCoins(userId, coins);
+
+    if (!updated) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient coins. User has ${await getBalance(userId)} coins but ${coins} required`,
+      });
+    }
 
     console.log(
-      `✅ Deducted ${coins} coins from user ${userId}. New balance: ${user.coins}`,
+      `✅ Deducted ${coins} coins from user ${userId}. New balance: ${updated.coins}`,
     );
 
     return res.status(200).json({
       success: true,
       message: `${coins} coins deducted successfully`,
-      remainingCoins: user.coins,
+      remainingCoins: updated.coins,
     });
   } catch (error) {
     console.error("Error deducting coins:", error);
