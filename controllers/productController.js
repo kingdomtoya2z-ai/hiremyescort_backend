@@ -12,6 +12,7 @@ import {
 import {
   FREE_AD_LIMIT,
   DUPLICATE_MESSAGE,
+  INVALID_LOCATION_MESSAGE,
   allowsContact,
   countActiveFreeAds,
   findDuplicateAd,
@@ -19,6 +20,7 @@ import {
   normalizeAdType,
   validateAdText,
   calculateExpiryDate,
+  resolveLocation,
 } from "../utils/adValidation.js";
 
 import {
@@ -125,6 +127,18 @@ export const addProduct = async (req, res) => {
       whatsapp = "";
       contact = "";
     }
+
+    // The locality has to be one the admin configured for this city. A city with no
+    // areas filed always falls back to the city itself, so a POST cannot invent
+    // an area and give it its own thin page.
+    const resolvedLocation = await resolveLocation(state, city, location);
+    if (resolvedLocation === null) {
+      return res.status(400).json({
+        success: false,
+        message: INVALID_LOCATION_MESSAGE,
+      });
+    }
+    location = resolvedLocation;
 
     // One account cannot run the same ad twice.
     const duplicate = await findDuplicateAd(userId, { title, about });
@@ -524,6 +538,22 @@ export const updateProduct = async (req, res) => {
     const nextWhatsapp = keepsContact ? (whatsapp ?? product.whatsapp) : "";
     const nextContact = keepsContact ? (contact ?? product.contact) : "";
 
+    // The locality has to be one the admin configured for the city this edit is
+    // saving, which may be a different city from the one it was posted in.
+    const nextState = state ?? product.state;
+    const nextCity = city ?? product.city;
+    const resolvedLocation = await resolveLocation(
+      nextState,
+      nextCity,
+      location ?? product.location,
+    );
+    if (resolvedLocation === null) {
+      return res.status(400).json({
+        success: false,
+        message: INVALID_LOCATION_MESSAGE,
+      });
+    }
+
     // The same duplicate rule as posting, ignoring this ad's own row.
     const duplicate = await findDuplicateAd(
       product.userId,
@@ -753,7 +783,9 @@ export const updateProduct = async (req, res) => {
 
     product.state = state ?? product.state;
     product.city = city ?? product.city;
-    product.location = location ?? product.location;
+    // The already-validated locality, not the raw submitted value: an edit that
+    // leaves the area blank on a city that has areas clears it to the city.
+    product.location = resolvedLocation;
     product.age = age ?? product.age;
     product.about = about ?? product.about;
     product.terms = terms ?? product.terms;

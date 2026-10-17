@@ -184,6 +184,22 @@ check("welcome coins granted only at signup",
   /coins:\s*NEW_USER_WELCOME_COINS/.test(userController));
 
 /* ------------------------------------------------------------------ *
+ * 7. A locality must exist for the city
+ * ------------------------------------------------------------------ */
+console.log("\nLocality rules:");
+check("posting resolves the submitted area",
+  /resolveLocation\(\s*state,\s*city,\s*location\s*\)/.test(controller),
+  "without this a direct POST invents an area, which then gets its own thin page");
+check("editing resolves it too",
+  /resolveLocation\(\s*\n?\s*nextState,/.test(controller),
+  "an edit could otherwise add an area the post path would have refused");
+check("an unknown area is rejected on both paths",
+  (controller.match(/INVALID_LOCATION_MESSAGE/g) || []).length >= 2,
+  "the post path and the edit path must each turn a null resolve into a 400");
+check("the saved value is the resolved one, not the raw input",
+  /product\.location = resolvedLocation/.test(controller));
+
+/* ------------------------------------------------------------------ *
  * 7. Client mirror
  * ------------------------------------------------------------------ */
 console.log("\nClient mirror (frontend-next/src/lib/adRules.js):");

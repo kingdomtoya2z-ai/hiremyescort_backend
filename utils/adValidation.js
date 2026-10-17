@@ -1,4 +1,6 @@
 import { Product } from "../models/productModel.js";
+import { State } from "../models/statesCitiesModel.js";
+import { escapeRegex } from "./sanitize.js";
 
 export const TITLE_MAX_LENGTH = 200;
 export const DESCRIPTION_MAX_LENGTH = 700;
@@ -57,6 +59,64 @@ export const calculateExpiryDate = (adType, approvalDate) => {
 
 export const getExpiryLabel = (adType) =>
   AD_EXPIRY_LABEL[normalizeAdType(adType)] ?? AD_EXPIRY_LABEL.premium;
+
+/**
+ * A locality has to exist in the admin's list for that city.
+ *
+ * The post-ad form offers a dropdown and drops to a locked "Whole city" when a
+ * city has no localities, so the UI cannot produce an arbitrary one. This is the
+ * same rule enforced server-side, because the form is not the only way to call
+ * the endpoint: without it a direct POST invents an area, and that area then
+ * gets its own /{category}/{city}/{location} page holding a single ad.
+ *
+ * Matching is case-insensitive so a value sent in a different case resolves to
+ * the configured locality instead of creating a near-duplicate.
+ */
+export const findCityLocations = async (stateName, cityName) => {
+  if (!stateName || !cityName) return null;
+
+  const state = await State.findOne({
+    name: { $regex: `^${escapeRegex(stateName)}$`, $options: "i" },
+  })
+    .select("cities")
+    .lean();
+
+  const city = state?.cities?.find(
+    (c) => String(c.name).toLowerCase() === String(cityName).toLowerCase(),
+  );
+
+  if (!city) return null;
+
+  return (city.locations || [])
+    .map((l) => (typeof l === "string" ? l : l?.name))
+    .filter(Boolean);
+};
+
+/**
+ * Resolve a submitted locality against the city's configured list.
+ *
+ * @returns the canonical locality name, `""` when the ad is filed against the
+ *          whole city, or `null` when the submitted value is not configured.
+ */
+export const resolveLocation = async (state, city, location) => {
+  const wanted = String(location || "").trim();
+  const configured = await findCityLocations(state, city);
+
+  // No list for this city, so there is nothing to match against: the ad is
+  // filed against the city and any submitted locality is dropped.
+  if (!configured || configured.length === 0) return "";
+
+  if (!wanted) return "";
+
+  const match = configured.find(
+    (name) => String(name).toLowerCase() === wanted.toLowerCase(),
+  );
+
+  return match ?? null; // null -> the caller turns it into a 400
+};
+
+export const INVALID_LOCATION_MESSAGE =
+  "That area is not set up for this city. Pick one from the list, or leave it as the whole city.";
 
 /**
  * Ad types that carry contact details: Golden and Premium.
