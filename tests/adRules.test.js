@@ -177,11 +177,13 @@ check("expiry job labels come from the shared helper",
   "the email must quote the same window the ad actually got");
 
 const userController = read("controllers/userController.js");
-check("welcome coins are a named constant, not a literal",
-  /NEW_USER_WELCOME_COINS\s*=\s*100/.test(userController),
+check("welcome coins fall back to a named default, not a literal",
+  /NEW_USER_WELCOME_COINS\s*=\s*DEFAULT_WELCOME_COINS/.test(userController),
   "a bare 1000/100 is the kind of number that gets changed without noticing");
-check("welcome coins granted only at signup",
-  /coins:\s*NEW_USER_WELCOME_COINS/.test(userController));
+check("welcome coins are read from the admin-controlled setting",
+  /getWelcomeCoins\(\)/.test(userController) &&
+    /coins:\s*welcomeCoins/.test(userController),
+  "the signup bonus must use the dashboard value, granted only at signup");
 
 /* ------------------------------------------------------------------ *
  * 7. A locality must exist for the city

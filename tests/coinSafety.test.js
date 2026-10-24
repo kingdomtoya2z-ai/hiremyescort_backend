@@ -205,15 +205,14 @@ const sites = files.flatMap((file) =>
  * Every write to a coin balance, in either direction, is one of a known set.
  *
  * Decreases are spending, not refunding. Increases are the only paths that can
- * give coins back, and there must be exactly three: the rejection refund (now
- * `addCoins` in utils/coinLedger.js), a verified payment, and the admin top-up.
- * None of them is reachable by expiry.
+ * give coins back, and there are exactly two `$inc` sites: the audited addCoins
+ * helper in utils/coinLedger.js (shared by the rejection refund and the admin
+ * top-up) and a verified payment. None of them is reachable by expiry.
  */
 const KNOWN = new Map([
-  ["utils/coinLedger.js:value", "increase: rejection refund via addCoins"],
+  ["utils/coinLedger.js:value", "increase: refund + admin top-up via addCoins"],
   ["utils/coinLedger.js:-value", "decrease: every spend via spendCoins"],
   ["controllers/paymentController.js:coins", "increase: verified payment"],
-  ["controllers/userController.js:manual top-up", "increase: admin top-up"],
 ]);
 
 const label = (s) => KNOWN.get(`${s.file}:${s.expr.replace(/;$/, "")}`);
@@ -222,8 +221,8 @@ const decreases = sites.filter((s) => label(s)?.startsWith("decrease"));
 const unknown = sites.filter((s) => !label(s));
 
 check(
-  `exactly 3 places increase a balance (found ${increases.length})`,
-  increases.length === 3,
+  `exactly 2 places increase a balance (found ${increases.length})`,
+  increases.length === 2,
   `an unrecognised balance increase is a refund path nobody has audited`,
 );
 check(
@@ -232,18 +231,22 @@ check(
   `unrecognised: ${unknown.map((s) => `${s.file} -> ${s.expr}`).join(", ")}`,
 );
 check(
-  "all coin writes live in coinLedger.js except the two audited credits",
+  "all coin writes live in coinLedger.js except the audited credits",
   sites.every(
     (s) =>
       s.file === "utils/coinLedger.js" ||
-      label(s) === "increase: verified payment" ||
-      label(s) === "increase: admin top-up",
+      label(s) === "increase: verified payment",
   ),
   "a controller writing a balance directly can overwrite a concurrent one",
 );
 check(
   "the manual rejection refund is the only refund tied to an ad",
   read("controllers/productController.js").includes("addCoins(ad.userId, refundAmount)"),
+);
+check(
+  "the admin top-up goes through the audited addCoins helper",
+  /const updated = await addCoins\(userId, coins\)/.test(read("controllers/userController.js")),
+  "a read-modify-write here can silently lose one of two concurrent top-ups",
 );
 check(
   "expiry never appears in a coin increase",

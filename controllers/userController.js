@@ -9,13 +9,21 @@ import { Product } from "../models/productModel.js";
 import { setTokenExpiry } from "../utils/tokenManager.js";
 import { sendDeleteEmail } from "../emailVerify/sendAdStatusMail.js";
 import { ensureString, ensureNumber } from "../utils/sanitize.js";
-import { getBalance, spendCoins } from "../utils/coinLedger.js";
+import {
+  addCoins,
+  getBalance,
+  spendCoins,
+} from "../utils/coinLedger.js";
+import { DEFAULT_WELCOME_COINS } from "../models/settingsModel.js";
+import { getWelcomeCoins } from "../utils/platformSettings.js";
 
 /**
- * Coins granted once, when an account is created. Enough for one golden ad, so
- * a new member can post a paid ad without buying a pack first.
+ * Fallback coins granted once, when an account is created. Admins can change
+ * the live value from the dashboard; this is what is used until they do (and
+ * if the settings read ever fails). Enough for one golden ad, so a new member
+ * can post a paid ad without buying a pack first.
  */
-export const NEW_USER_WELCOME_COINS = 100;
+export const NEW_USER_WELCOME_COINS = DEFAULT_WELCOME_COINS;
 
 export const register = async (req, res) => {
   try {
@@ -49,13 +57,16 @@ export const register = async (req, res) => {
       });
     }
     const hashedPassword = await bcrypt.hash(password, 10);
+    // Read the admin-configured signup bonus at the moment of registration,
+    // so a change in the dashboard applies to the very next account.
+    const welcomeCoins = await getWelcomeCoins();
     const newUser = await User.create({
       firstName,
       lastName,
       email,
       phoneNo: sanitizedPhone,
       password: hashedPassword,
-      coins: NEW_USER_WELCOME_COINS, // one-time welcome coins, granted only at signup
+      coins: welcomeCoins, // one-time welcome coins, granted only at signup
     });
     const token = jwt.sign({ id: newUser._id }, process.env.SECRET_KEY, {
       expiresIn: "10m",
@@ -746,17 +757,18 @@ export const refundCoins = async (req, res) => {
       });
     }
 
-    user.coins += coins;
-    await user.save();
+    // Atomic increment: two admins topping up the same account at once must
+    // both land. The previous read-modify-write could silently drop one.
+    const updated = await addCoins(userId, coins);
 
     console.log(
-      `✅ Refunded ${coins} coins to user ${userId}. New balance: ${user.coins}`,
+      `✅ Refunded ${coins} coins to user ${userId}. New balance: ${updated.coins}`,
     );
 
     return res.status(200).json({
       success: true,
       message: `${coins} coins refunded successfully`,
-      totalCoins: user.coins,
+      totalCoins: updated.coins,
     });
   } catch (error) {
     console.error("Error refunding coins:", error);

@@ -8,6 +8,7 @@ import paymentRoute from "./routes/paymentRoute.js";
 import contactRoute from "./routes/contactRoute.js";
 import seoRoute from "./routes/seoRoute.js";
 import bannerRoute from "./routes/bannerRoute.js";
+import settingsRoute from "./routes/settingsRoute.js";
 import sitemapRoute from "./routes/sitemapRoute.js";
 import cors from "cors";
 import startTokenCleanupJob, {
@@ -58,6 +59,7 @@ app.use("/api/v1/payment", paymentRoute);
 app.use("/api/v1/contact", contactRoute);
 app.use("/api/v1/seo", seoRoute);
 app.use("/api/v1/banner", bannerRoute);
+app.use("/api/v1/settings", settingsRoute);
 
 // Sitemap routes (served at root level for crawler access)
 app.use("/", sitemapRoute);
