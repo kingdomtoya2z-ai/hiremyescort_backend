@@ -8,6 +8,16 @@ export const ensureString = (value) => {
   return value;
 };
 
+/**
+ * Signup is restricted to Gmail addresses. The domain check is
+ * case-insensitive, so `User@GMAIL.com` is accepted, while every other
+ * domain (including lookalikes such as `gmail.co` or `gamil.com`) is not.
+ */
+export const GMAIL_ADDRESS_REGEX = /^[A-Za-z0-9._%+-]+@gmail\.com$/i;
+
+export const isGmailAddress = (value) =>
+  GMAIL_ADDRESS_REGEX.test(ensureString(value).trim());
+
 export const ensureNumber = (value) => {
   const num = Number(value);
   return Number.isFinite(num) ? num : 0;

@@ -8,7 +8,11 @@ import cloudinary from "../utils/cloudinary.js";
 import { Product } from "../models/productModel.js";
 import { setTokenExpiry } from "../utils/tokenManager.js";
 import { sendDeleteEmail } from "../emailVerify/sendAdStatusMail.js";
-import { ensureString, ensureNumber } from "../utils/sanitize.js";
+import {
+  ensureString,
+  ensureNumber,
+  isGmailAddress,
+} from "../utils/sanitize.js";
 import {
   addCoins,
   getBalance,
@@ -34,7 +38,13 @@ export const register = async (req, res) => {
         message: "All fields are required",
       });
     }
-    const sanitizedEmail = ensureString(email);
+    const sanitizedEmail = ensureString(email).trim();
+    if (!isGmailAddress(sanitizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: "Only Gmail addresses (@gmail.com) are allowed",
+      });
+    }
     const user = await User.findOne({ email: sanitizedEmail });
     if (user) {
       return res.status(400).json({
@@ -63,7 +73,7 @@ export const register = async (req, res) => {
     const newUser = await User.create({
       firstName,
       lastName,
-      email,
+      email: sanitizedEmail,
       phoneNo: sanitizedPhone,
       password: hashedPassword,
       coins: welcomeCoins, // one-time welcome coins, granted only at signup
@@ -73,7 +83,7 @@ export const register = async (req, res) => {
     });
     newUser.token = token;
     await newUser.save();
-    await verifyEmail(token, email); // send email here
+    await verifyEmail(token, sanitizedEmail); // send email here
     return res.status(201).json({
       success: true,
       message: "User registered successfully",
@@ -145,7 +155,13 @@ export const reVerify = async (req, res) => {
       });
     }
 
-    const sanitizedEmail = ensureString(email);
+    const sanitizedEmail = ensureString(email).trim();
+    if (!isGmailAddress(sanitizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: "Only Gmail addresses (@gmail.com) are allowed",
+      });
+    }
     const user = await User.findOne({ email: sanitizedEmail });
 
     if (!user) {
@@ -170,7 +186,7 @@ export const reVerify = async (req, res) => {
     user.token = token;
     await user.save();
 
-    await verifyEmail(token, email); // send email here
+    await verifyEmail(token, sanitizedEmail); // send email here
 
     return res.status(200).json({
       success: true,
@@ -195,9 +211,11 @@ export const login = async (req, res) => {
       });
     }
 
+    const sanitizedEmail = ensureString(email).trim();
+
     // Check if credentials match admin credentials from .env
     if (
-      email === process.env.ADMIN_EMAIL &&
+      sanitizedEmail === process.env.ADMIN_EMAIL &&
       password === process.env.ADMIN_PASSWORD
     ) {
       // Admin login
@@ -228,8 +246,15 @@ export const login = async (req, res) => {
       });
     }
 
+    // Only Gmail accounts are allowed on the platform.
+    if (!isGmailAddress(sanitizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: "Only Gmail addresses (@gmail.com) are allowed",
+      });
+    }
+
     // Regular user login - check database
-    const sanitizedEmail = ensureString(email);
     const exisistingUser = await User.findOne({ email: sanitizedEmail });
     if (!exisistingUser) {
       return res.status(400).json({
@@ -354,7 +379,13 @@ export const verifyToken = async (req, res) => {
 export const forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
-    const sanitizedEmail = ensureString(email);
+    const sanitizedEmail = ensureString(email).trim();
+    if (!isGmailAddress(sanitizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: "Only Gmail addresses (@gmail.com) are allowed",
+      });
+    }
     const user = await User.findOne({ email: sanitizedEmail });
     if (!user) {
       return res.status(400).json({
@@ -368,7 +399,7 @@ export const forgotPassword = async (req, res) => {
     user.otpExpiry = otpExpiry;
 
     await user.save();
-    await sendOTPMail(otp, email); // send OTP email function
+    await sendOTPMail(otp, sanitizedEmail); // send OTP email function
 
     return res.status(200).json({
       success: true,
