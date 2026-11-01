@@ -9,11 +9,13 @@ import {
   approveAd,
   rejectAd,
   getUserAdsForDashboard,
+  adminUpdateProduct,
 } from "../controllers/productController.js";
 import { isAdmin, isAuthenticated } from "../middleware/isAuthenticated.js";
 import { multipleUpload, runUpload } from "../middleware/multer.js";
 import { Product } from "../models/productModel.js";
 import { escapeRegex } from "../utils/sanitize.js";
+import { stripExpiredAd } from "../utils/adValidation.js";
 
 const router = express.Router();
 
@@ -32,6 +34,13 @@ router.get("/admin/all-ads", isAuthenticated, isAdmin, getAllAdsForAdmin);
 router.get("/admin/user-ads/:userId", isAuthenticated, isAdmin, getAdsByUser);
 router.put("/admin/approve/:adId", isAuthenticated, isAdmin, approveAd);
 router.put("/admin/reject/:adId", isAuthenticated, isAdmin, rejectAd);
+router.put(
+  "/admin/update/:adId",
+  isAuthenticated,
+  isAdmin,
+  runUpload(multipleUpload),
+  adminUpdateProduct,
+);
 
 // User dashboard route
 router.get("/user/my-ads", isAuthenticated, getUserAdsForDashboard);
@@ -56,11 +65,23 @@ router.get("/search", async (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
     const skip = (page - 1) * limit;
 
-    // Build filter object
-    const filter = {
-      status: "approved",
-      isExpired: false,
-    };
+    /*
+     * Public visibility: live approved ads plus expired ones.
+     *
+     * Expired ads stay searchable so their city/category pages keep their
+     * inventory, but the response below strips their photos and contact fields
+     * and the sort puts them after every live ad, free ones included.
+     */
+    const filter = {};
+    const andClauses = [
+      {
+        $or: [
+          { status: "approved", isExpired: false },
+          { isExpired: true },
+          { status: "expired" },
+        ],
+      },
+    ];
 
     // Map category slug to database values
     const categoryMap = {
@@ -106,11 +127,13 @@ router.get("/search", async (req, res) => {
 
     // FILTER 4: Ad type. The site has premium, golden and free ads, so this is
     // a real narrowing rather than a client-side pass over one page.
-    if (adType && ["premium", "golden", "free"].includes(String(adType))) {
+    if (adType === "premium" || adType === "golden") {
       filter.adType = String(adType);
     } else if (adType === "free") {
       // Anything with no adType recorded is a free ad.
-      filter.$or = [{ adType: "free" }, { adType: { $exists: false } }];
+      andClauses.push({
+        $or: [{ adType: "free" }, { adType: { $exists: false } }],
+      });
     }
 
     // FILTER 5: Age band.
@@ -131,6 +154,10 @@ router.get("/search", async (req, res) => {
     // narrows the whole result set rather than the dozen already on screen.
     if (String(hasPhotos) === "1") {
       filter.productImg = { $exists: true, $nin: [] };
+      // Expired ads are stored with their photos but are served without them,
+      // so they cannot satisfy a "has photos" filter.
+      andClauses.push({ isExpired: { $ne: true } });
+      andClauses.push({ status: { $ne: "expired" } });
     }
 
     // FILTER 7: Free-text keyword, over the fields a visitor would search.
@@ -138,15 +165,18 @@ router.get("/search", async (req, res) => {
     if (keyword) {
       const safe = escapeRegex(keyword);
       const rx = { $regex: safe, $options: "i" };
-      const text = { $or: [{ title: rx }, { about: rx }, { city: rx }, { location: rx }, { state: rx }] };
-      if (filter.$or) {
-        // adType=free already claimed $or; combine instead of overwriting.
-        filter.$and = [{ $or: filter.$or }, { $or: text.$or }];
-        delete filter.$or;
-      } else {
-        Object.assign(filter, text);
-      }
+      andClauses.push({
+        $or: [
+          { title: rx },
+          { about: rx },
+          { city: rx },
+          { location: rx },
+          { state: rx },
+        ],
+      });
     }
+
+    filter.$and = andClauses;
 
     /*
      * Execute query (single DB round trip: count + filtered page together).
@@ -166,6 +196,19 @@ router.get("/search", async (req, res) => {
             results: [
           {
             $addFields: {
+              // Expired ads come after every live ad, including live free ads.
+              expiredSort: {
+                $cond: [
+                  {
+                    $or: [
+                      { $eq: ["$status", "expired"] },
+                      { $eq: ["$isExpired", true] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
               adTypeSort: {
                 $switch: {
                   branches: [
@@ -177,10 +220,10 @@ router.get("/search", async (req, res) => {
               },
             },
           },
-          { $sort: { adTypeSort: 1, createdAt: -1 } },
+          { $sort: { expiredSort: 1, adTypeSort: 1, createdAt: -1 } },
           { $skip: skip },
           { $limit: limit },
-          { $unset: "adTypeSort" },
+          { $unset: ["adTypeSort", "expiredSort"] },
         ],
       },
     },
@@ -199,7 +242,7 @@ router.get("/search", async (req, res) => {
     }
 
 const total = facet?.total?.[0]?.count ?? 0;
-const products = facet?.results ?? [];
+const products = (facet?.results ?? []).map(stripExpiredAd);
 
 console.log(
   `[search] category=${category || "-"} state=${state || "-"} city=${city || "-"} location=${location || "-"} adType=${adType || "-"} age=${ageMin || "-"}..${ageMax || "-"} search=${keyword || "-"}${usedLooseMatch ? " (loose match)" : ""} → ${products.length} of ${total} results`,

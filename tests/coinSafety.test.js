@@ -8,10 +8,11 @@
  * transaction, not a failure of it, so there is nothing to give back.
  *
  * This exists as a test rather than a comment because the invariant is easy to
- * break by accident. The expiry job sets `status: "rejected"` and leaves
- * `coinsRefunded` false, which is correct but looks exactly like a rejected ad
- * awaiting its refund. The manual reject endpoint did in fact pay out on that
- * state once, for 1,312 ads that were sitting in it.
+ * break by accident. The expiry job sets `status: "expired"` and leaves
+ * `coinsRefunded` false. Before the dedicated status existed it wrote
+ * `rejected`, which looked exactly like a rejected ad awaiting its refund, and
+ * the manual reject endpoint did in fact pay out on that state once, for 1,312
+ * ads that were sitting in it.
  *
  * Run with `npm test`. No framework, no dependencies - it reads the source and
  * replays the decision logic, so it runs without a database.
@@ -116,6 +117,17 @@ check(
   /isExpired:\s*true/.test(expiry),
   "an expired ad must be marked expired, or the reject guard cannot see it",
 );
+check(
+  "uses the dedicated expired status",
+  /status:\s*"expired"/.test(expiry),
+  "expiry must not write rejected, or the ad lands in the owner's Rejected section",
+);
+check(
+  "migrates legacy rejected/approved expired rows",
+  /migrateLegacyExpiredAds/.test(expiry) &&
+    /status:\s*\{\s*\$in:\s*\[\s*"rejected",\s*"approved"\s*\]/.test(expiry),
+  "old rows written before the status existed must be moved to expired",
+);
 
 /* ------------------------------------------------------------------ *
  * 2. The manual reject endpoint must refuse to refund an expired ad
@@ -129,14 +141,19 @@ const rejectBody = product.slice(
 );
 
 check(
-  "guards on ad.isExpired before refunding",
-  /if\s*\(\s*ad\.isExpired\s*\)/.test(rejectBody),
+  "guards on isExpiredAd(ad) before refunding",
+  /if\s*\(\s*isExpiredAd\(\s*ad\s*\)\s*\)/.test(rejectBody),
   "without this guard an expired ad pays out, because the expiry job leaves coinsRefunded false",
 );
 check(
   "guard appears BEFORE the refund",
-  rejectBody.indexOf("ad.isExpired") < rejectBody.indexOf("addCoins("),
+  rejectBody.indexOf("isExpiredAd(ad)") < rejectBody.indexOf("addCoins("),
   "a guard placed after the refund does nothing",
+);
+check(
+  "expired reject keeps the dedicated status",
+  /status:\s*"expired"/.test(rejectBody),
+  "rejecting an expired ad must not move it into the Rejected section",
 );
 check(
   "still refunds a live paid ad",
@@ -154,15 +171,16 @@ const COSTS = { free: 0, golden: 100, premium: 200 };
 /** Mirrors the guard order in rejectAd. */
 function refundFor(ad) {
   if (ad.status === "rejected" && ad.coinsRefunded) return 0;
-  if (ad.isExpired) return 0;
+  if (ad.status === "expired" || ad.isExpired) return 0;
   return COSTS[ad.adType] || 0;
 }
 
 const cases = [
-  ["expired premium -> nothing back", { adType: "premium", status: "rejected", isExpired: true, coinsRefunded: false }, 0],
-  ["expired golden -> nothing back", { adType: "golden", status: "rejected", isExpired: true, coinsRefunded: false }, 0],
-  ["expired free -> nothing back", { adType: "free", status: "rejected", isExpired: true, coinsRefunded: false }, 0],
-  ["expired premium, repeated reject -> nothing back", { adType: "premium", status: "rejected", isExpired: true, coinsRefunded: false }, 0],
+  ["expired premium -> nothing back", { adType: "premium", status: "expired", isExpired: true, coinsRefunded: false }, 0],
+  ["expired golden -> nothing back", { adType: "golden", status: "expired", isExpired: true, coinsRefunded: false }, 0],
+  ["expired free -> nothing back", { adType: "free", status: "expired", isExpired: true, coinsRefunded: false }, 0],
+  ["legacy rejected + isExpired -> nothing back", { adType: "premium", status: "rejected", isExpired: true, coinsRefunded: false }, 0],
+  ["expired premium, repeated reject -> nothing back", { adType: "premium", status: "expired", isExpired: true, coinsRefunded: false }, 0],
   ["already refunded -> no double refund", { adType: "premium", status: "rejected", isExpired: false, coinsRefunded: true }, 0],
   ["live premium rejected -> 200 back", { adType: "premium", status: "approved", isExpired: false }, 200],
   ["live golden rejected -> 100 back", { adType: "golden", status: "pending", isExpired: false }, 100],

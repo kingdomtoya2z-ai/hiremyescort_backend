@@ -161,7 +161,7 @@ export const sendAdExpiryMail = async (email, adTitle, adId, adType, expiryPerio
                   <div style="max-width: 600px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                       <h2 style="color: #d32f2f; margin-bottom: 20px;">⏰ Your Advertisement Has Expired</h2>
                       <p style="color: #333; font-size: 16px; line-height: 1.6;">
-                          Your ${adTypeLabel} advertisement has reached the end of its validity period (${expiryPeriod}) and has been moved to your rejected ads section.
+                          Your ${adTypeLabel} advertisement has reached the end of its validity period (${expiryPeriod}) and has been moved to your Renew Ads section. It is no longer contactable, but its details are still saved.
                       </p>
                       <div style="background-color: #f0f0f0; padding: 15px; border-left: 4px solid #d32f2f; margin: 20px 0;">
                           <p style="margin: 5px 0; color: #555;"><strong>Ad Title:</strong> ${safeTitle}</p>
@@ -170,19 +170,19 @@ export const sendAdExpiryMail = async (email, adTitle, adId, adType, expiryPerio
                           <p style="margin: 5px 0; color: #555;"><strong>Validity Period:</strong> ${expiryPeriod}</p>
                       </div>
                       <p style="color: #333; font-size: 16px; line-height: 1.6;">
-                          Don't worry! Your advertisement details are still saved. You can easily resubmit your ad from your Dashboard by visiting your rejected ads section.
+                          Don't worry! Your advertisement details are still saved. You can easily renew your ad from your Dashboard by visiting your Renew Ads section.
                       </p>
-                      <h3 style="color: #333; margin-top: 25px; margin-bottom: 15px;">How to Resubmit:</h3>
+                      <h3 style="color: #333; margin-top: 25px; margin-bottom: 15px;">How to Renew:</h3>
                       <ol style="color: #555; font-size: 16px; line-height: 1.8;">
                           <li>Log in to your HireMyEscort account</li>
                           <li>Go to your Dashboard</li>
-                          <li>Navigate to the "Rejected Ads" section</li>
-                          <li>Find your expired ad and click "Resubmit"</li>
-                          <li>Review and make any updates if needed</li>
-                          <li>Submit for approval again</li>
+                          <li>Navigate to the "Renew Ads" section</li>
+                          <li>Find your expired ad and click "Renew ad"</li>
+                          <li>Choose Golden or Premium and review your details</li>
+                          <li>Confirm the renewal to go live again</li>
                       </ol>
                       <p style="color: #333; font-size: 16px; line-height: 1.6; margin-top: 20px;">
-                          If you have a ${adTypeLabel} ad, the same coin deduction will apply upon resubmission. Check your coin balance in your Dashboard before resubmitting.
+                          Renewal is available as Golden or Premium. The same coin deduction applies when you renew. Check your coin balance in your Dashboard before renewing.
                       </p>
                       <div style="text-align: center; margin-top: 30px;">
                           <a href="https://hiremyescort.com/user-dashboard" style="display: inline-block; background-color: #9333ea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">

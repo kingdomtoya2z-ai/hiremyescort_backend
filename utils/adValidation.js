@@ -141,6 +141,41 @@ export function normalizeAdType(adType) {
   return "free";
 }
 
+/* ------------------------------------------------------------------ *
+ * Expiry / renewal
+ * ------------------------------------------------------------------ */
+
+/**
+ * An ad is expired when the expiry job has given it the dedicated status, or
+ * when an older record is still carrying the legacy `rejected + isExpired`
+ * combination. Both must be treated the same everywhere: the public listing
+ * keeps the ad but hides its media/contact, and the owner gets a Renew action
+ * instead of a Rejected one.
+ */
+export const isExpiredAd = (ad) =>
+  String(ad?.status || "").toLowerCase() === "expired" || ad?.isExpired === true;
+
+/** Expired ads can be renewed only onto a paid plan. */
+export const RENEWABLE_AD_TYPES = ["golden", "premium"];
+
+export const isRenewableAdType = (adType) =>
+  RENEWABLE_AD_TYPES.includes(normalizeAdType(adType));
+
+/**
+ * Public-safe copy of an ad.
+ *
+ * Expired ads stay searchable so their city/category page does not go thin, but
+ * they must not expose photos or contact details until they are renewed. The
+ * strip happens on the server, not only in the UI, so the fields cannot be read
+ * out of the JSON or the RSC payload.
+ */
+export const stripExpiredAd = (ad) => {
+  if (!ad || !isExpiredAd(ad)) return ad;
+  return { ...ad, productImg: [], contact: "", whatsapp: "" };
+};
+
+export const stripExpiredAds = (ads) => (ads || []).map(stripExpiredAd);
+
 // Title and description must not exceed their limits and must not contain
 // any digits (numbers are not allowed in title/description).
 export const validateAdText = ({ title, about }) => {

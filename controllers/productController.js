@@ -21,6 +21,10 @@ import {
   validateAdText,
   calculateExpiryDate,
   resolveLocation,
+  getExpiryLabel,
+  isExpiredAd,
+  isRenewableAdType,
+  stripExpiredAd,
 } from "../utils/adValidation.js";
 
 import {
@@ -370,13 +374,29 @@ export const addProduct = async (req, res) => {
 
 export const getAllProduct = async (_, res) => {
   try {
-    // Fetch only approved products WITH expiry dates that are not expired
-    // This excludes old ads posted before the expiry system was implemented
+    /*
+     * The public catalogue contains live ads and expired ones.
+     *
+     * Expired ads stay in the list so their city/category page still has
+     * inventory and their detail URL resolves, but `stripExpiredAd` removes the
+     * photos and contact fields below. A pending or rejected ad (that has not
+     * expired) is still absent.
+     *
+     * `isExpired: true` also catches the legacy `rejected + isExpired` rows
+     * before the migration has run, so a deployment does not briefly 404 every
+     * expired profile.
+     */
     const products = await Product.find({
-      status: "approved",
-      isExpired: false,
-      approvalDate: { $ne: null, $exists: true },
-      expiryDate: { $ne: null, $exists: true },
+      $or: [
+        {
+          status: "approved",
+          isExpired: false,
+          approvalDate: { $ne: null, $exists: true },
+          expiryDate: { $ne: null, $exists: true },
+        },
+        { isExpired: true },
+        { status: "expired" },
+      ],
     })
       .lean()
       .exec();
@@ -389,9 +409,14 @@ export const getAllProduct = async (_, res) => {
       });
     }
 
-    // Sort products by type (premium -> golden -> free) then by creation date
+    // Sort products by type (premium -> golden -> free) then by creation date,
+    // with every expired ad after all live ads, including live free ones.
     const typeOrder = { premium: 0, golden: 1, free: 2 };
     products.sort((a, b) => {
+      const expiredA = isExpiredAd(a) ? 1 : 0;
+      const expiredB = isExpiredAd(b) ? 1 : 0;
+      if (expiredA !== expiredB) return expiredA - expiredB;
+
       const typeA = typeOrder[a.adType] !== undefined ? typeOrder[a.adType] : 2;
       const typeB = typeOrder[b.adType] !== undefined ? typeOrder[b.adType] : 2;
 
@@ -404,7 +429,7 @@ export const getAllProduct = async (_, res) => {
 
     return res.status(200).json({
       success: true,
-      products,
+      products: products.map(stripExpiredAd),
     });
   } catch (error) {
     return res.status(500).json({
@@ -479,10 +504,12 @@ export const updateProduct = async (req, res) => {
       terms,
       adType,
       existingImages,
+      renew,
     } = req.body;
 
     const userId = req.id;
     const userRole = req.user?.role;
+    const wantsRenew = String(renew) === "1" || String(renew) === "true";
 
     // Check if user has phone number set
     const userForPhone = await User.findById(userId);
@@ -522,6 +549,41 @@ export const updateProduct = async (req, res) => {
       });
     }
 
+    /*
+     * Renewal is a purchase made by the ad's owner from their own coin
+     * balance. An admin correcting someone else's ad uses the admin edit
+     * endpoint, which does not charge coins or change status.
+     */
+    if (wantsRenew && !isOwner) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the owner can renew this advertisement.",
+      });
+    }
+
+    /*
+     * An expired ad is not edited through the normal edit path. That path puts
+     * the ad back to `pending` (and charges for a paid plan), which would let an
+     * expired ad be resubmitted as Free and bypass the Renew flow. Expired ads
+     * have to go through `renew=1`, which is restricted to Golden/Premium and
+     * makes the ad live immediately.
+     */
+    if (isExpiredAd(product) && !wantsRenew) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This ad has expired. Renew it as Golden or Premium to make it live again.",
+        requiresRenewal: true,
+      });
+    }
+
+    if (wantsRenew && !isExpiredAd(product)) {
+      return res.status(400).json({
+        success: false,
+        message: "Only expired ads can be renewed.",
+      });
+    }
+
     // Title/description rules: max length + no numbers allowed
     const textError = validateAdText({ title, about });
     if (textError) {
@@ -530,6 +592,13 @@ export const updateProduct = async (req, res) => {
 
     // Target ad type (final type after this update)
     const newAdType = normalizeAdType(adType ?? product.adType);
+
+    if (wantsRenew && !isRenewableAdType(newAdType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Expired ads can only be renewed as Golden or Premium.",
+      });
+    }
 
     // Only premium ads keep contact details, so downgrading a premium ad to
     // free or golden clears the numbers rather than leaving them stored on a
@@ -632,19 +701,19 @@ export const updateProduct = async (req, res) => {
       });
     }
 
-    // Safe to proceed: remove images the user dropped, then append new uploads
+    /*
+     * Images the owner dropped are remembered here but NOT destroyed yet.
+     *
+     * The coin check below can still fail, and a failed renewal/update must not
+     * leave the ad with its old photos already deleted. Removal happens only
+     * after the spend succeeds, and uploads made during this request are
+     * destroyed if it does not.
+     */
     const removeImages = updatedImages.filter(
       (img) => !keepIds.includes(img.public_id),
     );
     updatedImages = keptImages;
-
-    for (let img of removeImages) {
-      try {
-        await cloudinary.uploader.destroy(img.public_id);
-      } catch (err) {
-        console.error("❌ Cloudinary delete error:", err.message);
-      }
-    }
+    const newlyUploaded = [];
 
     // ---------------------------
     // UPLOAD NEW IMAGES (WITH IMAGE WATERMARK)
@@ -682,15 +751,29 @@ export const updateProduct = async (req, res) => {
             ],
           });
 
-          updatedImages.push({
+          const uploaded = {
             url: result.secure_url,
             public_id: result.public_id,
-          });
+          };
+          updatedImages.push(uploaded);
+          newlyUploaded.push(uploaded);
         } catch (err) {
           console.error("❌ Cloudinary upload failed:", err.message);
         }
       }
     }
+
+    const discardNewUploads = async () => {
+      await Promise.all(
+        newlyUploaded.map((img) =>
+          cloudinary.uploader
+            .destroy(img.public_id)
+            .catch((err) =>
+              console.error("Cloudinary cleanup error:", err.message),
+            ),
+        ),
+      );
+    };
 
     // Coin costs for ad types
     const coinCosts = {
@@ -708,6 +791,7 @@ export const updateProduct = async (req, res) => {
       const user = await User.findById(userId);
 
       if (!user) {
+        await discardNewUploads();
         return res.status(404).json({
           success: false,
           message: "User not found",
@@ -715,17 +799,19 @@ export const updateProduct = async (req, res) => {
       }
 
       if (user.coins < coinsNeeded) {
+        await discardNewUploads();
         return res.status(400).json({
           success: false,
           message: `Insufficient coins. You need ${coinsNeeded} coins for a ${newAdType} ad. You have ${user.coins} coins.`,
         });
       }
 
-      // Deduct coins for resubmission. Atomic, so two concurrent edits cannot
-      // both spend the same balance.
+      // Deduct coins for resubmission/renewal. Atomic, so two concurrent edits
+      // cannot both spend the same balance.
       updatedUser = await spendCoins(userId, coinsNeeded);
 
       if (!updatedUser) {
+        await discardNewUploads();
         return res.status(400).json({
           success: false,
           message: insufficientCoinsMessage(
@@ -737,7 +823,7 @@ export const updateProduct = async (req, res) => {
       }
 
       console.log(
-        `💳 Deducted ${coinsNeeded} coins for ${newAdType} ad resubmission. New balance: ${updatedUser.coins}`,
+        `💳 Deducted ${coinsNeeded} coins for ${newAdType} ad ${wantsRenew ? "renewal" : "resubmission"}. New balance: ${updatedUser.coins}`,
       );
 
       // Create coin transaction record
@@ -748,13 +834,25 @@ export const updateProduct = async (req, res) => {
           coinsAmount: coinsNeeded,
           adId: productId,
           adType: newAdType,
-          reason: `Coins deducted for ${newAdType} advertisement resubmission "${title ?? product.title}"`,
+          reason: `Coins deducted for ${newAdType} advertisement ${wantsRenew ? "renewal" : "resubmission"} "${title ?? product.title}"`,
           status: "completed",
         });
-        console.log("✅ CoinTransaction created for resubmission");
+        console.log(
+          `✅ CoinTransaction created for ${wantsRenew ? "renewal" : "resubmission"}`,
+        );
       } catch (txnError) {
         console.error("❌ Error creating coin transaction:", txnError.message);
         // Don't fail the update if transaction logging fails
+      }
+    }
+
+    // The spend succeeded (or the ad is free), so the dropped images can now be
+    // removed safely.
+    for (let img of removeImages) {
+      try {
+        await cloudinary.uploader.destroy(img.public_id);
+      } catch (err) {
+        console.error("❌ Cloudinary delete error:", err.message);
       }
     }
 
@@ -792,7 +890,24 @@ export const updateProduct = async (req, res) => {
     product.adType = newAdType;
     product.productImg = updatedImages;
 
-    product.status = "pending";
+    if (wantsRenew) {
+      /*
+       * Renewal is a purchase, not a moderation event: the ad goes live as soon
+       * as the coins are spent, with a fresh window measured from now. This is
+       * the same expiry helper approval uses, so a renewed Golden gets exactly
+       * the four days an approved Golden gets.
+       */
+      const approvalDate = new Date();
+      product.status = "approved";
+      product.isExpired = false;
+      product.rejectReason = "";
+      product.approvalDate = approvalDate;
+      product.expiryDate = calculateExpiryDate(newAdType, approvalDate);
+      product.coinsRefunded = false;
+    } else {
+      // A normal edit is re-moderated.
+      product.status = "pending";
+    }
 
     await product.save();
 
@@ -805,17 +920,240 @@ export const updateProduct = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message:
-        coinsNeeded > 0
+      message: wantsRenew
+        ? `Advertisement renewed as ${newAdType} and live for ${getExpiryLabel(newAdType)}${coinsNeeded > 0 ? `. ${coinsNeeded} coins deducted` : ""}.`
+        : coinsNeeded > 0
           ? `Product updated successfully and ${coinsNeeded} coins deducted for resubmission`
           : "Product updated successfully",
       product,
       coins: updatedUser?.coins || 0,
       coinsDeducted: coinsNeeded,
+      renewed: wantsRenew,
+      status: product.status,
     });
   } catch (error) {
     console.error("🔥 UPDATE ERROR:", error);
 
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Internal Server Error",
+    });
+  }
+};
+
+/**
+ * Admin edit for any ad.
+ *
+ * This is deliberately separate from `updateProduct`: an admin is correcting an
+ * existing listing, not resubmitting it. There is no owner phone requirement,
+ * no coin charge and no change to status, approval date or expiry date. A live
+ * ad stays live, a pending ad stays pending, and an expired ad stays expired
+ * (its public media/contact remain hidden until the owner renews it).
+ */
+export const adminUpdateProduct = async (req, res) => {
+  try {
+    const { adId } = req.params;
+    const {
+      title,
+      whatsapp,
+      contact,
+      gender,
+      services,
+      category,
+      state,
+      city,
+      location,
+      age,
+      about,
+      terms,
+      adType,
+      existingImages,
+    } = req.body;
+
+    const product = await Product.findById(adId);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Advertisement not found",
+      });
+    }
+
+    const textError = validateAdText({
+      title: title ?? product.title,
+      about: about ?? product.about,
+    });
+    if (textError) {
+      return res.status(400).json({ success: false, message: textError });
+    }
+
+    const newAdType = normalizeAdType(adType ?? product.adType);
+    const keepsContact = allowsContact(newAdType);
+    const nextWhatsapp = keepsContact ? (whatsapp ?? product.whatsapp) : "";
+    const nextContact = keepsContact ? (contact ?? product.contact) : "";
+
+    const nextState = state ?? product.state;
+    const nextCity = city ?? product.city;
+    const resolvedLocation = await resolveLocation(
+      nextState,
+      nextCity,
+      location ?? product.location,
+    );
+    if (resolvedLocation === null) {
+      return res.status(400).json({
+        success: false,
+        message: INVALID_LOCATION_MESSAGE,
+      });
+    }
+
+    const duplicate = await findDuplicateAd(
+      product.userId,
+      { title: title ?? product.title, about: about ?? product.about },
+      adId,
+    );
+    if (duplicate) {
+      return res.status(400).json({
+        success: false,
+        message: DUPLICATE_MESSAGE,
+        duplicateReason: duplicate.reason,
+      });
+    }
+
+    const maxImages = getMaxImagesForAdType(newAdType);
+    const imageLimitMessage = (kept, adding) =>
+      maxImages === 0
+        ? `${newAdType === "free" ? "Free" : newAdType} ads cannot include photos. Remove the photo${kept + adding > 1 ? "s" : ""} and save again.`
+        : `Maximum ${maxImages} image${maxImages > 1 ? "s" : ""} allowed for ${newAdType} ads${kept + adding > 0 ? ` (you have ${kept} saved and are adding ${adding})` : ""}.`;
+
+    const incomingFiles = req.files?.length || 0;
+    if (incomingFiles > maxImages) {
+      return res.status(400).json({
+        success: false,
+        message: imageLimitMessage(0, incomingFiles),
+      });
+    }
+
+    let updatedImages = Array.isArray(product.productImg)
+      ? [...product.productImg]
+      : [];
+
+    /*
+     * If `existingImages` is omitted entirely, keep every saved image. That is
+     * the safe default for an API caller correcting one field; an explicit
+     * array is how the form says which images it removed.
+     */
+    let keepIds;
+    if (existingImages === undefined) {
+      keepIds = updatedImages.map((img) => img.public_id);
+    } else {
+      keepIds = [];
+      try {
+        const parsed = JSON.parse(existingImages);
+        if (Array.isArray(parsed)) keepIds = parsed;
+      } catch (err) {
+        console.error("❌ existingImages parse error:", err.message);
+        keepIds = [];
+      }
+    }
+
+    if (maxImages === 0) keepIds = [];
+
+    const keptImages = updatedImages.filter((img) =>
+      keepIds.includes(img.public_id),
+    );
+
+    if (keptImages.length + incomingFiles > maxImages) {
+      return res.status(400).json({
+        success: false,
+        message: imageLimitMessage(keptImages.length, incomingFiles),
+      });
+    }
+
+    const removeImages = updatedImages.filter(
+      (img) => !keepIds.includes(img.public_id),
+    );
+    updatedImages = keptImages;
+
+    if (req.files && req.files.length > 0) {
+      for (let file of req.files) {
+        try {
+          const fileUri = getDataUri(file);
+          const result = await cloudinary.uploader.upload(fileUri, {
+            folder: "mern_products",
+            quality: "auto",
+            fetch_format: "auto",
+            transformation: [
+              {
+                width: 500,
+                height: 500,
+                crop: "fill",
+                gravity: "auto",
+              },
+              {
+                overlay: "watermark",
+                flags: "relative",
+                width: "0.6",
+                crop: "scale",
+                gravity: "center",
+                opacity: 40,
+              },
+            ],
+          });
+
+          updatedImages.push({
+            url: result.secure_url,
+            public_id: result.public_id,
+          });
+        } catch (err) {
+          console.error("❌ Cloudinary upload failed:", err.message);
+        }
+      }
+    }
+
+    for (let img of removeImages) {
+      try {
+        await cloudinary.uploader.destroy(img.public_id);
+      } catch (err) {
+        console.error("❌ Cloudinary delete error:", err.message);
+      }
+    }
+
+    product.title = title ?? product.title;
+    product.whatsapp = nextWhatsapp;
+    product.contact = nextContact;
+    product.gender = gender ?? product.gender;
+    product.services = services ?? product.services;
+
+    let normalizedCategory = category;
+    if (category) {
+      const categoryMap = {
+        "call-girls": "Call Girls",
+        massage: "Massage",
+        "couple-friendly": "Couple Friendly",
+      };
+      if (categoryMap[category]) normalizedCategory = categoryMap[category];
+    }
+    product.category = normalizedCategory ?? product.category;
+
+    product.state = state ?? product.state;
+    product.city = city ?? product.city;
+    product.location = resolvedLocation;
+    product.age = age ?? product.age;
+    product.about = about ?? product.about;
+    product.terms = terms ?? product.terms;
+    product.adType = newAdType;
+    product.productImg = updatedImages;
+
+    // Status, approvalDate, expiryDate, isExpired and coinsRefunded are
+    // intentionally untouched.
+    await product.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Advertisement updated successfully",
+      product,
+    });
+  } catch (error) {
+    console.error("🔥 ADMIN UPDATE ERROR:", error);
     return res.status(500).json({
       success: false,
       message: error.message || "Internal Server Error",
@@ -916,6 +1254,21 @@ export const approveAd = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Advertisement not found",
+      });
+    }
+
+    /*
+     * Expired ads do not go live through approval. Their owner has to renew
+     * them as Golden or Premium, which is what charges coins and gives them a
+     * fresh window. Letting an admin approve one here would reactivate it for
+     * free and bypass the Renew flow entirely.
+     */
+    if (isExpiredAd(ad)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This advertisement has expired. The owner must renew it as Golden or Premium before it can go live again.",
+        requiresRenewal: true,
       });
     }
 
@@ -1052,8 +1405,8 @@ export const rejectAd = async (req, res) => {
     /*
      * An ad that ran out its validity period is NEVER refundable.
      *
-     * The expiry job moves ads to `rejected` but deliberately does not refund -
-     * the coins were spent on a month of visibility that was used. It leaves
+     * The expiry job moves ads to `expired` but deliberately does not refund -
+     * the coins were spent on a window of visibility that was used. It leaves
      * `coinsRefunded` false, because nothing was refunded.
      *
      * That made the guard above a hole: it only short-circuits when
@@ -1066,11 +1419,16 @@ export const rejectAd = async (req, res) => {
      * Rejecting an expired ad is still allowed - an admin may want to record a
      * reason - it just cannot move coins.
      */
-    if (ad.isExpired) {
+    if (isExpiredAd(ad)) {
+      /*
+       * Keep the dedicated `expired` status. Rejecting here is only recording a
+       * reason; it must not move the ad into the owner's Rejected section, where
+       * it would look like a moderation decision and lose the Renew action.
+       */
       const updatedExpiredAd = await Product.findByIdAndUpdate(
         adId,
         {
-          status: "rejected",
+          status: "expired",
           isExpired: true,
           coinsRefunded: false,
           ...(reason ? { rejectReason: reason } : {}),
@@ -1081,7 +1439,7 @@ export const rejectAd = async (req, res) => {
       return res.status(200).json({
         success: true,
         message:
-          "Advertisement had already expired. No coins were refunded - expiry is not a refundable event.",
+          "Advertisement has expired and stays in the owner's Renew Ads section. No coins were refunded - expiry is not a refundable event.",
         ad: updatedExpiredAd,
         refundedCoins: 0,
       });

@@ -27,7 +27,10 @@ const productSchema = new mongoose.Schema(
     terms: { type: String, required: true },
     status: {
       type: String,
-      enum: ["pending", "approved", "rejected"],
+      // `expired` is deliberately separate from `rejected`: an expired ad is
+      // still publicly searchable (without photos/contact) and belongs in the
+      // owner's Renew section, not their Rejected section.
+      enum: ["pending", "approved", "rejected", "expired"],
       default: "pending",
     },
     adType: {

@@ -22,20 +22,31 @@ import { fileURLToPath } from "node:url";
 import {
   FREE_AD_LIMIT,
   DUPLICATE_SIMILARITY_THRESHOLD,
+  RENEWABLE_AD_TYPES,
   allowsContact,
   calculateExpiryDate,
   getExpiryLabel,
   getMaxImagesForAdType,
+  isExpiredAd,
+  isRenewableAdType,
   normalizeAdType,
   normalizeForCompare,
   similarity,
+  stripExpiredAd,
+  stripExpiredAds,
 } from "../utils/adValidation.js";
 
 /* The client mirror is plain ESM with no dependencies, so it imports directly. */
 const clientRules = await import(
   new URL("../../frontend-next/src/lib/adRules.js", import.meta.url).href
 );
-const { showsListingContact, forListing } = clientRules;
+const {
+  showsListingContact,
+  forListing,
+  isExpiredAd: clientIsExpiredAd,
+  isRenewableAdType: clientIsRenewableAdType,
+  RENEWABLE_AD_TYPES: CLIENT_RENEWABLE_AD_TYPES,
+} = clientRules;
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(join(root, p), "utf8");
@@ -106,6 +117,72 @@ check("listing strips contact before it reaches the client component",
   "whole products would put every non-premium number in the RSC payload");
 
 /* ------------------------------------------------------------------ *
+ * 2b. Expired ads stay listed but lose media and contact
+ * ------------------------------------------------------------------ */
+console.log("\nExpired ads:");
+eq("dedicated expired status", isExpiredAd({ status: "expired" }), true);
+eq("legacy rejected + isExpired", isExpiredAd({ status: "rejected", isExpired: true }), true);
+eq("legacy approved + isExpired", isExpiredAd({ status: "approved", isExpired: true }), true);
+eq("live approved is not expired", isExpiredAd({ status: "approved", isExpired: false }), false);
+eq("plain rejection is not expiry", isExpiredAd({ status: "rejected", isExpired: false }), false);
+eq("renewable plans are golden and premium", RENEWABLE_AD_TYPES, ["golden", "premium"]);
+eq("golden is renewable", isRenewableAdType("golden"), true);
+eq("premium is renewable", isRenewableAdType("premium"), true);
+eq("free is not renewable", isRenewableAdType("free"), false);
+eq("unknown type fails closed", isRenewableAdType("bogus"), false);
+
+const expiredAd = {
+  _id: "expired-1",
+  status: "expired",
+  isExpired: true,
+  adType: "premium",
+  title: "still searchable",
+  productImg: [{ url: "photo.jpg", public_id: "photo" }],
+  contact: "9999999999",
+  whatsapp: "8888888888",
+};
+const liveAd = {
+  _id: "live-1",
+  status: "approved",
+  isExpired: false,
+  adType: "premium",
+  title: "live",
+  productImg: [{ url: "live.jpg", public_id: "live" }],
+  contact: "7777777777",
+  whatsapp: "6666666666",
+};
+
+const strippedExpired = stripExpiredAd(expiredAd);
+eq("expired photos are stripped", strippedExpired.productImg, []);
+eq("expired contact fields are stripped", [strippedExpired.contact, strippedExpired.whatsapp], ["", ""]);
+eq("expired title is preserved", strippedExpired.title, "still searchable");
+eq("live ad keeps its photos", stripExpiredAd(liveAd).productImg.length, 1);
+eq("live ad keeps its contact", stripExpiredAd(liveAd).contact, "7777777777");
+eq("legacy expired row is stripped too",
+  stripExpiredAd({ status: "rejected", isExpired: true, contact: "1", productImg: [{ url: "x" }] }).contact,
+  "");
+eq("stripExpiredAds maps a list",
+  stripExpiredAds([expiredAd, liveAd]).map((a) => a.contact),
+  ["", "7777777777"]);
+
+const listingExpired = forListing(expiredAd);
+check("client listing strips expired photos",
+  Array.isArray(listingExpired.productImg) && listingExpired.productImg.length === 0,
+  "an expired ad's photos must not reach the listing payload");
+check("client listing drops expired contact",
+  listingExpired.contact === undefined && listingExpired.whatsapp === undefined,
+  "an expired ad's number must not reach the listing payload");
+const listingLivePremium = forListing(liveAd);
+eq("client listing keeps live premium contact",
+  [listingLivePremium.contact, listingLivePremium.whatsapp],
+  ["7777777777", "6666666666"]);
+eq("client sees the same expired status", clientIsExpiredAd({ status: "expired" }), true);
+eq("client sees the legacy expired combination",
+  clientIsExpiredAd({ status: "rejected", isExpired: true }), true);
+eq("client renewal plans match", CLIENT_RENEWABLE_AD_TYPES, RENEWABLE_AD_TYPES);
+eq("client renewal rule matches", clientIsRenewableAdType("free"), isRenewableAdType("free"));
+
+/* ------------------------------------------------------------------ *
  * 3. Lifetime, measured from approval
  * ------------------------------------------------------------------ */
 console.log("\nExpiry (from the approval date):");
@@ -171,10 +248,58 @@ check("approval uses the shared expiry helper",
   /expiryDate = calculateExpiryDate\(/.test(controller),
   "a local copy of the window is how the two copies drifted apart before");
 
+const routes = read("routes/productRoute.js");
+check("public catalogue includes expired ads",
+  /isExpiredAd/.test(controller) && /status:\s*"expired"/.test(controller),
+  "expired ads must stay visible, not disappear from the catalogue");
+check("public catalogue strips expired media/contact",
+  /products:\s*products\.map\(stripExpiredAd\)/.test(controller),
+  "the public catalogue must not leak an expired ad's photos or numbers");
+check("search includes expired ads",
+  /status:\s*"expired"/.test(routes) && /isExpired: true/.test(routes),
+  "the search endpoint must keep expired ads in the result set");
+check("search sorts expired ads last",
+  /\$sort:\s*\{\s*expiredSort:\s*1/.test(routes),
+  "expired ads must rank below every live ad, including live free ads");
+check("search strips expired media/contact",
+  /\.map\(stripExpiredAd\)/.test(routes),
+  "search results must not leak an expired ad's photos or numbers");
+check("renewal is restricted to Golden/Premium",
+  /isRenewableAdType\(newAdType\)/.test(controller) &&
+    /renewed:\s*wantsRenew/.test(controller),
+  "renewal must charge for a paid plan and never reactivate as Free");
+check("normal edit of an expired ad requires renewal",
+  /requiresRenewal:\s*true/.test(controller),
+  "an expired ad must not be resubmitted through the normal edit path");
+check("admin update controller exists",
+  /export const adminUpdateProduct/.test(controller));
+check("admin update route exists",
+  /\/admin\/update\/:adId/.test(routes));
+const adminBody = controller.slice(
+  controller.indexOf("export const adminUpdateProduct"),
+  controller.indexOf("// Admin functions", controller.indexOf("export const adminUpdateProduct")),
+);
+check("admin update preserves status and expiry",
+  adminBody.length > 0 &&
+    !/product\.status\s*=/.test(adminBody) &&
+    !/product\.expiryDate\s*=/.test(adminBody) &&
+    !/product\.approvalDate\s*=/.test(adminBody),
+  "an admin correcting an ad must not reactivate or extend it");
+check("admin update does not move coins",
+  adminBody.length > 0 &&
+    !/spendCoins|addCoins|CoinTransaction/.test(adminBody),
+  "an admin correction is free; charging or refunding belongs to the owner paths");
+
 const expiry = read("utils/adExpiryChecker.js");
 check("expiry job labels come from the shared helper",
   /getExpiryLabel\(/.test(expiry),
   "the email must quote the same window the ad actually got");
+check("expiry job writes the dedicated status",
+  /status:\s*"expired"/.test(expiry),
+  "writing rejected puts expired ads in the owner's Rejected section");
+check("expiry job migrates legacy expired rows",
+  /migrateLegacyExpiredAds/.test(expiry),
+  "old rejected + isExpired rows need the dedicated status too");
 
 const userController = read("controllers/userController.js");
 check("welcome coins fall back to a named default, not a literal",

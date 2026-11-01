@@ -3,11 +3,45 @@ import { User } from "../models/userModel.js";
 import { sendAdExpiryMail } from "../emailVerify/sendAdStatusMail.js";
 import { getExpiryLabel } from "./adValidation.js";
 
+/**
+ * Move legacy `rejected + isExpired` records onto the dedicated status.
+ *
+ * Before this status existed the expiry job wrote `rejected`, which put every
+ * expired ad in the owner's Rejected section and made it indistinguishable from
+ * an ad a moderator had actually declined. The migration is idempotent and runs
+ * before each expiry pass, so a deployment fixes the old rows even if the
+ * separate migration script is never invoked.
+ */
+export const migrateLegacyExpiredAds = async () => {
+  const result = await Product.updateMany(
+    {
+      isExpired: true,
+      status: { $in: ["rejected", "approved"] },
+    },
+    {
+      $set: {
+        status: "expired",
+        rejectReason: "",
+      },
+    },
+  );
+
+  if (result.modifiedCount > 0) {
+    console.log(
+      `🔁 Migrated ${result.modifiedCount} legacy expired ad(s) to status "expired"`,
+    );
+  }
+
+  return result.modifiedCount;
+};
+
 // Main function to check and expire ads
 export const createCheckAndExpireAds = () => {
   return async () => {
     try {
       console.log("⏰ Running ad expiry check job...");
+
+      await migrateLegacyExpiredAds();
 
       // Find all approved ads that haven't expired yet
       const approvedAds = await Product.find({
@@ -34,10 +68,11 @@ export const createCheckAndExpireAds = () => {
           const updatedAd = await Product.findByIdAndUpdate(
             ad._id,
             {
-              status: "rejected",
+              status: "expired",
               isExpired: true,
-              rejectReason:
-                "Your ad has expired. Please resubmit to continue advertising.",
+              // Expiry is not a moderation decision, so no rejection reason is
+              // stored. The owner sees the ad under Renew with the plan choices.
+              rejectReason: "",
             },
             { new: true },
           );
@@ -68,7 +103,7 @@ export const createCheckAndExpireAds = () => {
             }
           }
 
-          console.log(`✅ Ad ${ad._id} moved to rejected status (expired)`);
+          console.log(`✅ Ad ${ad._id} moved to expired status`);
         } catch (adError) {
           console.error(
             `❌ Error processing ad ${ad._id} for expiry:`,
