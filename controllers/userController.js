@@ -671,14 +671,15 @@ export const deleteUser = async (req, res) => {
         message: "User not found",
       });
     }
-     if (user && user.email){
-      try{
-        await sendDeleteEmail(user.email)
-
-      }catch(error){ console.error("Failed to send rejection email:", emailError);
-        // Continue anyway - don't fail the rejection if email fails
+    // The deletion itself must not depend on the notification email. If the
+    // mail provider is down or misconfigured, log it and keep going.
+    if (user.email) {
+      try {
+        await sendDeleteEmail(user.email);
+      } catch (error) {
+        console.error("Failed to send deletion email:", error);
       }
-     }
+    }
 
     // Delete user's profile picture from cloudinary if exists
     if (user.profilePicPublicId) {
