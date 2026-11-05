@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { Product } from "../models/productModel.js";
 import { User } from "../models/userModel.js";
 import { CoinTransaction } from "../models/coinTransactionModel.js";
@@ -430,6 +431,70 @@ export const getAllProduct = async (_, res) => {
     return res.status(200).json({
       success: true,
       products: products.map(stripExpiredAd),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+/**
+ * GET /api/v1/product/:productId
+ *
+ * Public single-ad lookup, used by the Next.js detail page.
+ *
+ * Why this exists: the frontend used to resolve a profile by downloading the
+ * entire catalogue from /getallproducts and indexing it by id. That payload has
+ * grown past 4.6 MB, which is over Next.js's 2 MB limit for a single
+ * `unstable_cache` entry, so the cache write failed and the index could be
+ * missing an ad that was already approved - the ad then 404'd on its own page.
+ * One id in, one ad out, with a response small enough to cache.
+ *
+ * Visibility is deliberately identical to getAllProduct: live approved ads and
+ * expired ads (stripped of photos/contact) are public. Pending and rejected ads
+ * are not, so this endpoint answers 404 for them just as the catalogue omits
+ * them. Keeping the two filters in step is what stops this endpoint becoming a
+ * way to read an unapproved ad by guessing its id.
+ */
+export const getPublicProductById = async (req, res) => {
+  try {
+    const { productId } = req.params;
+
+    if (!mongoose.isValidObjectId(productId)) {
+      return res.status(404).json({
+        success: false,
+        message: "Advertisement not found",
+      });
+    }
+
+    const product = await Product.findOne({
+      _id: productId,
+      $or: [
+        {
+          status: "approved",
+          isExpired: false,
+          approvalDate: { $ne: null, $exists: true },
+          expiryDate: { $ne: null, $exists: true },
+        },
+        { isExpired: true },
+        { status: "expired" },
+      ],
+    })
+      .lean()
+      .exec();
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Advertisement not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      product: stripExpiredAd(product),
     });
   } catch (error) {
     return res.status(500).json({

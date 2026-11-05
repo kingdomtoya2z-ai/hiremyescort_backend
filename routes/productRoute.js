@@ -10,6 +10,7 @@ import {
   rejectAd,
   getUserAdsForDashboard,
   adminUpdateProduct,
+  getPublicProductById,
 } from "../controllers/productController.js";
 import { isAdmin, isAuthenticated } from "../middleware/isAuthenticated.js";
 import { multipleUpload, runUpload } from "../middleware/multer.js";
@@ -296,5 +297,13 @@ router.get("/api/v1/product/city/:citySlug", async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+/*
+ * Public single-ad lookup.
+ *
+ * Must stay LAST: this is a catch-all one-segment GET, so registering it before
+ * /getallproducts, /search, /admin/... or /user/my-ads would shadow them.
+ */
+router.get("/:productId", getPublicProductById);
 
 export default router;
