@@ -641,13 +641,7 @@ export const updateUser = async (req, res) => {
     user.city = city || user.city;
     user.state = state || user.state;
     user.zipCode = zipCode || user.zipCode;
-    /*
-     * Only change the role when one was actually sent. The admin edit form
-     * always includes it, but the profile editor omits it for a regular user
-     * and this used to overwrite the stored role with `undefined`, which made
-     * the account fail the `role !== "admin"` check but also lost "user".
-     */
-    user.role = role || user.role;
+    user.role = role;
     user.profilePic = profilePicUrl;
     user.profilePicPublicId = profilePicPublicId;
 
