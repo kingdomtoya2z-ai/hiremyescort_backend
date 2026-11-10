@@ -77,6 +77,19 @@ export const addProduct = async (req, res) => {
       });
     }
 
+    /*
+     * Publishing requires a verified email. The client replaces the form with a
+     * verification panel; this is the enforcement that a direct API call cannot
+     * skip. Editing or renewing an existing ad does not go through this handler.
+     */
+    if (!user.isVerified) {
+      return res.status(403).json({
+        success: false,
+        message: "Verify your email address before posting an ad",
+        requiresEmailVerification: true,
+      });
+    }
+
     // Normalize category: frontend sends slugs, convert to proper database format
     const categoryMap = {
       "call-girls": "Call Girls",
