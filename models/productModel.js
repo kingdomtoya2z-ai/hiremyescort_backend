@@ -7,8 +7,18 @@ const productSchema = new mongoose.Schema(
       ref: "User",
     },
     title: { type: String, required: true },
+    /**
+     * Comparison-only copies of the fields spam detection matches on.
+     *
+     * The raw values are still what the site displays. These exist so the
+     * online duplicate check can use an index instead of loading the whole
+     * catalogue and normalising it in JavaScript on every post.
+     */
+    titleNormalized: { type: String, default: "", index: true },
     whatsapp: { type: String, required: true },
     contact: { type: String, required: true },
+    whatsappNormalized: { type: String, default: "", index: true },
+    contactNormalized: { type: String, default: "", index: true },
     gender: { type: String, required: true },
     services: { type: String, required: true },
 
@@ -58,5 +68,11 @@ productSchema.index({
   adType: 1,
   createdAt: -1,
 });
+
+// Cross-account spam detection. Each lookup is "same value on another live
+// ad", so the status/expiry fields come before the value in the index.
+productSchema.index({ status: 1, isExpired: 1, titleNormalized: 1 });
+productSchema.index({ status: 1, isExpired: 1, contactNormalized: 1 });
+productSchema.index({ status: 1, isExpired: 1, whatsappNormalized: 1 });
 
 export const Product = mongoose.model("Product", productSchema);

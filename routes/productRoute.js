@@ -14,13 +14,20 @@ import {
 } from "../controllers/productController.js";
 import { isAdmin, isAuthenticated } from "../middleware/isAuthenticated.js";
 import { multipleUpload, runUpload } from "../middleware/multer.js";
+import { adLimiter } from "../middleware/rateLimiter.js";
 import { Product } from "../models/productModel.js";
 import { escapeRegex } from "../utils/sanitize.js";
 import { stripExpiredAd } from "../utils/adValidation.js";
 
 const router = express.Router();
 
-router.post("/add", isAuthenticated, runUpload(multipleUpload), addProduct);
+/*
+ * The IP limiter was defined but never mounted, so a single host could post ad
+ * after ad as fast as it could upload images. It is deliberately generous -
+ * shared NAT makes a low per-IP limit punish unrelated users - and the
+ * cross-account duplicate check inside addProduct is the real spam guard.
+ */
+router.post("/add", isAuthenticated, adLimiter, runUpload(multipleUpload), addProduct);
 router.get("/getallproducts", getAllProduct);
 router.delete("/delete/:productId", isAuthenticated, deleteProduct);
 router.put(

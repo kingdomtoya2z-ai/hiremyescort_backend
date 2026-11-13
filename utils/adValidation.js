@@ -1,6 +1,7 @@
 import { Product } from "../models/productModel.js";
 import { State } from "../models/statesCitiesModel.js";
 import { escapeRegex } from "./sanitize.js";
+import { normalizePhone } from "./identity.js";
 
 export const TITLE_MAX_LENGTH = 200;
 export const DESCRIPTION_MAX_LENGTH = 700;
@@ -308,3 +309,112 @@ export const findDuplicateAd = async (userId, { title, about }, excludeProductId
 
 export const DUPLICATE_MESSAGE =
   "You already have an ad with this title or a very similar description. Edit or delete your existing ad instead of posting a duplicate.";
+
+/* ------------------------------------------------------------------ *
+ * Cross-account duplicate detection
+ * ------------------------------------------------------------------ */
+
+/** A real Indian mobile number, in storage form. */
+const isComparablePhone = (value) => /^[6-9]\d{9}$/.test(value);
+
+/**
+ * Build the query that finds an active ad belonging to a DIFFERENT account
+ * with the same title or contact number.
+ *
+ * `findDuplicateAd` above only compares one account's own ads. A spam run does
+ * the opposite: it uses a fresh account each time, so every individual account
+ * looks clean. These two signals survive that:
+ *
+ *   - the same normalised title across accounts, and
+ *   - the same contact/WhatsApp number across accounts.
+ *
+ * A phone number is the stronger signal, but a free ad stores no number, so
+ * the title check is what catches a batch of free listings.
+ *
+ * Kept as a pure function so the query can be tested without a database.
+ */
+export const buildCrossAccountQuery = (
+  userId,
+  { title, contact, whatsapp } = {},
+  excludeProductId,
+) => {
+  const or = [];
+
+  const normTitle = normalizeForCompare(title);
+  if (normTitle) {
+    or.push({ titleNormalized: normTitle });
+
+    // Older ads predate `titleNormalized`, so also match the raw title
+    // case-insensitively. This keeps the guard effective before a backfill has
+    // been run, and costs nothing when the index is present.
+    const rawTitle = String(title || "").trim();
+    if (rawTitle) {
+      or.push({
+        title: { $regex: `^${escapeRegex(rawTitle)}$`, $options: "i" },
+      });
+    }
+  }
+
+  const phones = [...new Set([normalizePhone(contact), normalizePhone(whatsapp)])]
+    .filter(isComparablePhone);
+
+  if (phones.length) {
+    or.push(
+      { contactNormalized: { $in: phones } },
+      { whatsappNormalized: { $in: phones } },
+    );
+  }
+
+  if (!or.length) return null;
+
+  const query = {
+    userId: { $ne: userId },
+    isExpired: false,
+    status: { $in: ["pending", "approved"] },
+    $or: or,
+  };
+
+  if (excludeProductId) {
+    query._id = { $ne: excludeProductId };
+  }
+
+  return query;
+};
+
+/**
+ * Return the first active ad on another account that matches, or null.
+ * The caller turns a match into a 400 before any coins are spent.
+ */
+export const findCrossAccountSpam = async (
+  userId,
+  { title, contact, whatsapp } = {},
+  excludeProductId,
+) => {
+  const query = buildCrossAccountQuery(
+    userId,
+    { title, contact, whatsapp },
+    excludeProductId,
+  );
+  if (!query) return null;
+
+  const existing = await Product.findOne(query)
+    .select("userId title contact whatsapp")
+    .lean();
+
+  if (!existing) return null;
+
+  const phones = [normalizePhone(contact), normalizePhone(whatsapp)].filter(
+    isComparablePhone,
+  );
+  const samePhone =
+    phones.includes(normalizePhone(existing.contact)) ||
+    phones.includes(normalizePhone(existing.whatsapp));
+
+  return {
+    reason: samePhone ? "contact" : "title",
+    existing,
+  };
+};
+
+export const CROSS_ACCOUNT_MESSAGE =
+  "This ad matches an existing live listing under another account. Change the title or contact details and try again, or contact support if you believe this is a mistake.";

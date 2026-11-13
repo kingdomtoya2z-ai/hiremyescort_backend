@@ -38,7 +38,7 @@ import {
 
 /* The client mirror is plain ESM with no dependencies, so it imports directly. */
 const clientRules = await import(
-  new URL("../../frontend-next/src/lib/adRules.js", import.meta.url).href
+  new URL("../../../frontend/hiremyescort_frontend/src/lib/adRules.js", import.meta.url).href
 );
 const {
   showsListingContact,
@@ -107,11 +107,11 @@ const keptPremium = forListing({ _id: "2", adType: "premium", contact: "999", wh
 eq("listing payload keeps a premium number", [keptPremium.contact, keptPremium.whatsapp], ["999", "888"]);
 eq("listing payload preserves other fields", forListing({ _id: "3", adType: "golden", title: "keep me" }).title, "keep me");
 
-const card = read("../frontend-next/src/components/ads/AdCard.jsx");
+const card = read("../../frontend/hiremyescort_frontend/src/components/ads/AdCard.jsx");
 check("listing row gates its buttons on the listing rule",
   /showsListingContact\(product\.adType\)/.test(card),
   "AdCard must gate on showsListingContact, not allowsContact");
-const listing = read("../frontend-next/src/components/ads/AdListing.jsx");
+const listing = read("../../frontend/hiremyescort_frontend/src/components/ads/AdListing.jsx");
 check("listing strips contact before it reaches the client component",
   /forListingAll\(products\)/.test(listing),
   "whole products would put every non-premium number in the RSC payload");
@@ -329,9 +329,9 @@ check("the saved value is the resolved one, not the raw input",
 /* ------------------------------------------------------------------ *
  * 7. Client mirror
  * ------------------------------------------------------------------ */
-console.log("\nClient mirror (frontend-next/src/lib/adRules.js):");
+console.log("\nClient mirror (frontend/hiremyescort_frontend/src/lib/adRules.js):");
 const clientRulesSource = readFileSync(
-  join(root, "..", "frontend-next", "src", "lib", "adRules.js"),
+  join(root, "..", "..", "frontend", "hiremyescort_frontend", "src", "lib", "adRules.js"),
   "utf8",
 );
 for (const [label, pattern] of [

@@ -16,8 +16,15 @@ import {
   deductCoins,
   refundCoins,
   verifyToken,
+  removeSpamUser,
+  bulkRemoveSpamUsers,
+  getSpamClusters,
+  getBlockedIdentities,
+  addBlockedIdentity,
+  deleteBlockedIdentity,
 } from "../controllers/userController.js";
 import { isAdmin, isAuthenticated } from "../middleware/isAuthenticated.js";
+import { canonicalEmail } from "../utils/identity.js";
 import { singleUpload } from "../middleware/multer.js";
 import {
   loginLimiter,
@@ -51,8 +58,8 @@ const router = express.Router();
  * For the routes that do take an email it arrives in the body, except
  * /verify-otp/:email and /change-password/:email where it is in the path.
  */
-const emailFromBody = (req) => req.body?.email;
-const emailFromPath = (req) => req.params?.email;
+const emailFromBody = (req) => canonicalEmail(req.body?.email);
+const emailFromPath = (req) => canonicalEmail(req.params?.email);
 
 router.post(
   "/register",
@@ -88,5 +95,19 @@ router.put("/update/:userId", isAuthenticated, singleUpload, updateUser);
 router.delete("/delete-user/:userId", isAuthenticated, isAdmin, deleteUser);
 router.put("/deduct-coins/:userId", isAuthenticated, isAdmin, deductCoins);
 router.put("/refund-coins/:userId", isAuthenticated, isAdmin, refundCoins);
+
+/*
+ * Spam controls.
+ *
+ * `remove-spam` blocks the account's email/phone/IP and then deletes it, so the
+ * same person cannot simply register again. `bulk-remove-spam` is the cleanup
+ * action for a whole cluster found by the spam-clusters report.
+ */
+router.post("/admin/remove-spam/:userId", isAuthenticated, isAdmin, removeSpamUser);
+router.post("/admin/bulk-remove-spam", isAuthenticated, isAdmin, bulkRemoveSpamUsers);
+router.get("/admin/spam-clusters", isAuthenticated, isAdmin, getSpamClusters);
+router.get("/admin/blocked-identities", isAuthenticated, isAdmin, getBlockedIdentities);
+router.post("/admin/blocked-identities", isAuthenticated, isAdmin, addBlockedIdentity);
+router.delete("/admin/blocked-identities/:id", isAuthenticated, isAdmin, deleteBlockedIdentity);
 
 export default router;

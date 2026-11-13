@@ -1,6 +1,24 @@
+import mongoose from "mongoose";
 import { User } from "../models/userModel.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { canonicalEmail, emailLookupFilter, getClientIp } from "../utils/identity.js";
+import {
+  blockIdentities,
+  findBlockedIdentity,
+  listBlockedIdentities,
+  unblockIdentity,
+} from "../utils/blocklist.js";
+import {
+  MAX_ACCOUNTS_PER_IP,
+  SIGNUP_IP_WINDOW_MS,
+} from "../utils/abuseLimits.js";
+import {
+  blockUserIdentities,
+  deleteUserCascade,
+  destroyProductImages,
+} from "../utils/accountCleanup.js";
+import { findSpamClusters } from "../services/spamService.js";
 import { verifyEmail } from "../emailVerify/verifyEmail.js";
 import { Session } from "../models/sessionModel.js";
 import { sendOTPMail } from "../emailVerify/sendOTPMail.js";
@@ -45,14 +63,26 @@ export const register = async (req, res) => {
         message: "Only Gmail addresses (@gmail.com) are allowed",
       });
     }
-    const user = await User.findOne({ email: sanitizedEmail });
+    const emailCanonical = canonicalEmail(sanitizedEmail);
+
+    /*
+     * Compare the canonical mailbox, not the raw address.
+     *
+     * Gmail treats john.doe+spam@gmail.com and johndoe@gmail.com as the same
+     * inbox, so the old raw comparison let one person register an unlimited
+     * number of accounts from a single email address.
+     */
+    const user = await User.findOne(emailLookupFilter(sanitizedEmail));
     if (user) {
       return res.status(400).json({
         success: false,
         message: "User already exists",
       });
     }
-    const sanitizedPhone = phoneNo.replace(/\D/g, "");
+
+    const sanitizedPhone = ensureString(phoneNo)
+      .replace(/\D/g, "")
+      .slice(-10);
     if (!/^[6-9]\d{9}$/.test(sanitizedPhone)) {
       return res.status(400).json({
         success: false,
@@ -66,6 +96,46 @@ export const register = async (req, res) => {
         message: "A user with this phone number already exists",
       });
     }
+
+    const ip = getClientIp(req);
+
+    /*
+     * A deleted spam account can try again. The blocklist is what turns an
+     * account deletion into an actual stop, and it matches the canonical
+     * email so a new Gmail alias does not get around it.
+     */
+    const blocked = await findBlockedIdentity({
+      email: sanitizedEmail,
+      phone: sanitizedPhone,
+      ip,
+    });
+    if (blocked) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "This email, phone number or network is not allowed to create an account. If you believe this is a mistake, please contact support.",
+      });
+    }
+
+    /*
+     * One connection creating a batch of accounts is the signature of the
+     * spam pattern. The limit is generous enough for a shared home/office/NAT
+     * (see utils/abuseLimits.js) but small enough to stop a registration run.
+     */
+    if (MAX_ACCOUNTS_PER_IP > 0 && ip) {
+      const recentSignups = await User.countDocuments({
+        signupIp: ip,
+        createdAt: { $gte: new Date(Date.now() - SIGNUP_IP_WINDOW_MS) },
+      });
+      if (recentSignups >= MAX_ACCOUNTS_PER_IP) {
+        return res.status(429).json({
+          success: false,
+          message:
+            "Too many accounts have been created from this network. Please try again later, or contact support if you need help.",
+        });
+      }
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
     // Read the admin-configured signup bonus at the moment of registration,
     // so a change in the dashboard applies to the very next account.
@@ -74,9 +144,12 @@ export const register = async (req, res) => {
       firstName,
       lastName,
       email: sanitizedEmail,
+      emailCanonical,
       phoneNo: sanitizedPhone,
       password: hashedPassword,
       coins: welcomeCoins, // one-time welcome coins, granted only at signup
+      signupIp: ip,
+      signupUserAgent: String(req.headers["user-agent"] || "").slice(0, 300),
     });
     const token = jwt.sign({ id: newUser._id }, process.env.SECRET_KEY, {
       expiresIn: "10m",
@@ -84,10 +157,18 @@ export const register = async (req, res) => {
     newUser.token = token;
     await newUser.save();
     await verifyEmail(token, sanitizedEmail); // send email here
+
+    // Never return the password hash or the verification/OTP secrets.
+    const safeUser = newUser.toObject();
+    delete safeUser.password;
+    delete safeUser.token;
+    delete safeUser.otp;
+    delete safeUser.otpExpiry;
+
     return res.status(201).json({
       success: true,
       message: "User registered successfully",
-      user: newUser,
+      user: safeUser,
     });
   } catch (error) {
     return res.status(500).json({
@@ -162,7 +243,7 @@ export const reVerify = async (req, res) => {
         message: "Only Gmail addresses (@gmail.com) are allowed",
       });
     }
-    const user = await User.findOne({ email: sanitizedEmail });
+    const user = await User.findOne(emailLookupFilter(sanitizedEmail));
 
     if (!user) {
       return res.status(400).json({
@@ -254,14 +335,34 @@ export const login = async (req, res) => {
       });
     }
 
-    // Regular user login - check database
-    const exisistingUser = await User.findOne({ email: sanitizedEmail });
+    /*
+     * Regular user login - check database.
+     *
+     * The canonical filter also accepts a dot/+tag variant of the address the
+     * account was registered with, which is how Gmail users normally type it.
+     */
+    const exisistingUser = await User.findOne(
+      emailLookupFilter(sanitizedEmail),
+    );
     if (!exisistingUser) {
       return res.status(400).json({
         success: false,
         message: "User not exist",
       });
     }
+
+    /*
+     * A banned account gets the same answer whether or not the password is
+     * correct. That avoids turning this endpoint into a password oracle for a
+     * suspended account.
+     */
+    if (exisistingUser.isBanned) {
+      return res.status(403).json({
+        success: false,
+        message: "This account has been suspended. Please contact support.",
+      });
+    }
+
     const isPasswordValid = await bcrypt.compare(
       password,
       exisistingUser.password,
@@ -292,6 +393,7 @@ export const login = async (req, res) => {
     );
 
     exisistingUser.isLoggedIn = true;
+    exisistingUser.lastLoginIp = getClientIp(req);
     await setTokenExpiry(exisistingUser._id, accessToken);
     await exisistingUser.save();
 
@@ -386,7 +488,7 @@ export const forgotPassword = async (req, res) => {
         message: "Only Gmail addresses (@gmail.com) are allowed",
       });
     }
-    const user = await User.findOne({ email: sanitizedEmail });
+    const user = await User.findOne(emailLookupFilter(sanitizedEmail));
     if (!user) {
       return res.status(400).json({
         success: false,
@@ -416,14 +518,14 @@ export const forgotPassword = async (req, res) => {
 export const verifyOTP = async (req, res) => {
   try {
     const { otp } = req.body;
-    const email = ensureString(req.params.email);
+    const email = ensureString(req.params.email).trim();
     if (!otp) {
       return res.status(400).json({
         success: false,
         message: "OTP is required",
       });
     }
-    const user = await User.findOne({ email });
+    const user = await User.findOne(emailLookupFilter(email));
     if (!user) {
       return res.status(400).json({
         success: false,
@@ -466,8 +568,8 @@ export const verifyOTP = async (req, res) => {
 export const changePassword = async (req, res) => {
   try {
     const { newPassword, confirmPassword } = req.body;
-    const email = ensureString(req.params.email);
-    const user = await User.findOne({ email });
+    const email = ensureString(req.params.email).trim();
+    const user = await User.findOne(emailLookupFilter(email));
     if (!user) {
       return res.status(400).json({
         success: false,
@@ -663,6 +765,13 @@ export const deleteUser = async (req, res) => {
   try {
     const { userId } = req.params;
 
+    if (!mongoose.isValidObjectId(userId)) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
     // Find and delete user
     const user = await User.findById(userId);
     if (!user) {
@@ -671,6 +780,25 @@ export const deleteUser = async (req, res) => {
         message: "User not found",
       });
     }
+
+    /*
+     * Deleting a spam account should also stop the person registering again.
+     * That is opt-in here (`?block=true`) because a normal "delete my account"
+     * request must not permanently block the user's own email address.
+     */
+    const shouldBlock =
+      String(req.query.block) === "true" || req.body?.block === true;
+    const reason =
+      ensureString(req.body?.reason).trim() || "Admin deleted account";
+
+    let blocked = 0;
+    if (shouldBlock) {
+      blocked = (await blockUserIdentities(user, {
+        reason,
+        createdBy: String(req.id),
+      })).length;
+    }
+
     // The deletion itself must not depend on the notification email. If the
     // mail provider is down or misconfigured, log it and keep going.
     if (user.email) {
@@ -690,18 +818,312 @@ export const deleteUser = async (req, res) => {
       }
     }
 
-    // Delete user from database
-    await User.findByIdAndDelete(userId);
-
-    // Delete all user's advertisements
-    await Product.deleteMany({ userId });
-
-    // Delete all user sessions
-    await Session.deleteMany({ userId });
+    const removed = await deleteUserCascade(userId, { deleteAds: true });
 
     return res.status(200).json({
       success: true,
       message: "User and all associated data deleted successfully",
+      blocked: blocked > 0,
+      ...removed,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+/**
+ * Delete or ban one spam account and remove its listings.
+ *
+ * Shared by the single-account and bulk admin endpoints so the two cannot
+ * drift: both block the identifiers first, then either hard-delete the account
+ * or set `isBanned`, and both remove the ads and their Cloudinary images.
+ */
+const removeOrBanAccount = async (
+  user,
+  { reason, hardDelete, deleteAds, block, createdBy },
+) => {
+  const blocked = block
+    ? await blockUserIdentities(user, { reason, createdBy })
+    : [];
+
+  if (hardDelete) {
+    const removed = await deleteUserCascade(user._id, { deleteAds });
+    return {
+      userId: String(user._id),
+      deleted: true,
+      blocked: blocked.length,
+      ...removed,
+    };
+  }
+
+  user.isBanned = true;
+  user.bannedAt = new Date();
+  user.banReason = reason;
+  user.isLoggedIn = false;
+  user.token = null;
+  user.tokenExpiry = null;
+  await user.save();
+
+  await Session.deleteMany({ userId: user._id });
+
+  let adsDeleted = 0;
+  let imagesDeleted = 0;
+
+  if (deleteAds) {
+    const products = await Product.find({ userId: user._id })
+      .select("productImg")
+      .lean();
+    const imageResult = await destroyProductImages(products);
+    adsDeleted = products.length;
+    imagesDeleted = imageResult.imagesDeleted;
+    await Product.deleteMany({ userId: user._id });
+  }
+
+  return {
+    userId: String(user._id),
+    banned: true,
+    blocked: blocked.length,
+    adsDeleted,
+    imagesDeleted,
+  };
+};
+
+/**
+ * POST /api/v1/user/admin/remove-spam/:userId
+ *
+ * The admin "remove & block" action. Hard-deletes by default because the goal
+ * is to remove the account, but `hardDelete: false` keeps the account in the
+ * panel as a banned record.
+ */
+export const removeSpamUser = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!mongoose.isValidObjectId(userId)) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const {
+      reason = "Spam or abusive account",
+      hardDelete = true,
+      deleteAds = true,
+      block = true,
+    } = req.body || {};
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    if (user.role === "admin" || user.email === process.env.ADMIN_EMAIL) {
+      return res.status(400).json({
+        success: false,
+        message: "Admin accounts cannot be removed here.",
+      });
+    }
+
+    const result = await removeOrBanAccount(user, {
+      reason: ensureString(reason).trim() || "Spam or abusive account",
+      hardDelete: hardDelete !== false,
+      deleteAds: deleteAds !== false,
+      block: block !== false,
+      createdBy: String(req.id),
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: result.deleted
+        ? "Spam account and its ads removed"
+        : "Account suspended and its ads removed",
+      result,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+/**
+ * POST /api/v1/user/admin/bulk-remove-spam
+ * Body: { userIds: [], reason?, hardDelete?, deleteAds?, block? }
+ *
+ * Capped at 100 accounts per request. Cloudinary deletions are sequential per
+ * account, so a very large batch would make the request time out anyway; the
+ * admin can send the next page.
+ */
+export const bulkRemoveSpamUsers = async (req, res) => {
+  try {
+    const {
+      userIds,
+      reason = "Spam or abusive accounts",
+      hardDelete = true,
+      deleteAds = true,
+      block = true,
+    } = req.body || {};
+
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide at least one userId",
+      });
+    }
+
+    if (userIds.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Remove at most 100 accounts per request.",
+      });
+    }
+
+    const results = [];
+    for (const userId of userIds) {
+      if (!mongoose.isValidObjectId(userId)) {
+        results.push({ userId, skipped: "invalid id" });
+        continue;
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        results.push({ userId, skipped: "not found" });
+        continue;
+      }
+
+      if (user.role === "admin" || user.email === process.env.ADMIN_EMAIL) {
+        results.push({ userId, skipped: "admin account protected" });
+        continue;
+      }
+
+      try {
+        results.push(
+          await removeOrBanAccount(user, {
+            reason: ensureString(reason).trim() || "Spam or abusive accounts",
+            hardDelete: hardDelete !== false,
+            deleteAds: deleteAds !== false,
+            block: block !== false,
+            createdBy: String(req.id),
+          }),
+        );
+      } catch (error) {
+        results.push({ userId, error: error.message });
+      }
+    }
+
+    const deleted = results.filter((result) => result.deleted).length;
+    const banned = results.filter((result) => result.banned).length;
+
+    return res.status(200).json({
+      success: true,
+      message: `${deleted} account${deleted === 1 ? "" : "s"} deleted, ${banned} suspended`,
+      deleted,
+      banned,
+      results,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+/**
+ * GET /api/v1/user/admin/spam-clusters
+ *
+ * Read-only. Groups accounts that share a phone number, Gmail mailbox,
+ * signup IP, ad title or ad contact number. An admin reviews a cluster before
+ * anything is removed.
+ */
+export const getSpamClusters = async (req, res) => {
+  try {
+    const minUsers = Math.max(Number(req.query.minUsers) || 2, 2);
+    const clusters = await findSpamClusters({ minUsers });
+
+    return res.status(200).json({
+      success: true,
+      count: clusters.length,
+      clusters,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+/** GET /api/v1/user/admin/blocked-identities */
+export const getBlockedIdentities = async (req, res) => {
+  try {
+    const identities = await listBlockedIdentities({
+      type: req.query.type,
+      limit: req.query.limit,
+    });
+
+    return res.status(200).json({ success: true, identities });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+/** POST /api/v1/user/admin/blocked-identities { type, value, reason } */
+export const addBlockedIdentity = async (req, res) => {
+  try {
+    const { type, value, reason = "" } = req.body || {};
+
+    if (!["email", "phone", "ip"].includes(type) || !value) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide type (email, phone or ip) and a value.",
+      });
+    }
+
+    const identities = await blockIdentities([{ type, value }], {
+      reason: ensureString(reason).trim(),
+      createdBy: String(req.id),
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Identifier blocked",
+      identities,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+/** DELETE /api/v1/user/admin/blocked-identities/:id */
+export const deleteBlockedIdentity = async (req, res) => {
+  try {
+    const removed = await unblockIdentity(req.params.id);
+
+    if (!removed) {
+      return res.status(404).json({
+        success: false,
+        message: "Block entry not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Identifier unblocked",
     });
   } catch (error) {
     return res.status(500).json({

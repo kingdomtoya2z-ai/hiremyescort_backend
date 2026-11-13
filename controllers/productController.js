@@ -10,15 +10,19 @@ import {
   insufficientCoinsMessage,
   spendCoins,
 } from "../utils/coinLedger.js";
+import { normalizePhone } from "../utils/identity.js";
 import {
   FREE_AD_LIMIT,
   DUPLICATE_MESSAGE,
   INVALID_LOCATION_MESSAGE,
   allowsContact,
+  CROSS_ACCOUNT_MESSAGE,
   countActiveFreeAds,
+  findCrossAccountSpam,
   findDuplicateAd,
   getMaxImagesForAdType,
   normalizeAdType,
+  normalizeForCompare,
   validateAdText,
   calculateExpiryDate,
   resolveLocation,
@@ -168,6 +172,25 @@ export const addProduct = async (req, res) => {
       });
     }
 
+    /*
+     * A spam run uses a fresh account for every copy, so the per-account check
+     * above never sees it. The same title or contact number on another live ad
+     * is the signal that survives an account switch. Reject before the image
+     * upload and before any coins move.
+     */
+    const crossAccount = await findCrossAccountSpam(userId, {
+      title,
+      contact,
+      whatsapp,
+    });
+    if (crossAccount) {
+      return res.status(400).json({
+        success: false,
+        message: CROSS_ACCOUNT_MESSAGE,
+        duplicateReason: crossAccount.reason,
+      });
+    }
+
     // Coin costs for ad types
     const coinCosts = {
       free: 0,
@@ -307,8 +330,11 @@ export const addProduct = async (req, res) => {
     const newProduct = await Product.create({
       userId,
       title,
+      titleNormalized: normalizeForCompare(title),
       whatsapp,
+      whatsappNormalized: normalizePhone(whatsapp),
       contact,
+      contactNormalized: normalizePhone(contact),
       gender,
       services,
       category,
@@ -715,6 +741,25 @@ export const updateProduct = async (req, res) => {
       });
     }
 
+    // The same cross-account guard as posting. Without it, a spammer could
+    // post a unique title and then edit it into the copy used elsewhere.
+    const crossAccount = await findCrossAccountSpam(
+      product.userId,
+      {
+        title: title ?? product.title,
+        contact: nextContact,
+        whatsapp: nextWhatsapp,
+      },
+      productId,
+    );
+    if (crossAccount) {
+      return res.status(400).json({
+        success: false,
+        message: CROSS_ACCOUNT_MESSAGE,
+        duplicateReason: crossAccount.reason,
+      });
+    }
+
     // Free ads: a user can have at most FREE_AD_LIMIT at once (excluding this ad)
     if (newAdType === "free") {
       const freeCount = await countActiveFreeAds(userId, productId);
@@ -968,6 +1013,11 @@ export const updateProduct = async (req, res) => {
     product.adType = newAdType;
     product.productImg = updatedImages;
 
+    // Keep the comparison fields in step with the values the site displays.
+    product.titleNormalized = normalizeForCompare(product.title);
+    product.contactNormalized = normalizePhone(product.contact);
+    product.whatsappNormalized = normalizePhone(product.whatsapp);
+
     if (wantsRenew) {
       /*
        * Renewal is a purchase, not a moderation event: the ad goes live as soon
@@ -1220,6 +1270,12 @@ export const adminUpdateProduct = async (req, res) => {
     product.terms = terms ?? product.terms;
     product.adType = newAdType;
     product.productImg = updatedImages;
+
+    // Admin corrections update the comparison fields too; otherwise an admin
+    // fixing a spammy title would leave the old normalised value behind.
+    product.titleNormalized = normalizeForCompare(product.title);
+    product.contactNormalized = normalizePhone(product.contact);
+    product.whatsappNormalized = normalizePhone(product.whatsapp);
 
     // Status, approvalDate, expiryDate, isExpired and coinsRefunded are
     // intentionally untouched.

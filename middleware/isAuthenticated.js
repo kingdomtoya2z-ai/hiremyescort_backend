@@ -1,4 +1,5 @@
 import { User } from "../models/userModel.js";
+import { Session } from "../models/sessionModel.js";
 import jwt from "jsonwebtoken";
 
 export const isAuthenticated = async (req, res, next) => {
@@ -49,6 +50,19 @@ export const isAuthenticated = async (req, res, next) => {
       return res.status(401).json({
         success: false,
         message: "User no longer exists",
+      });
+    }
+
+    /*
+     * A suspended account is rejected before any handler runs, so a token
+     * issued before the ban cannot be used to keep posting or editing. The
+     * session row is removed too, which signs the user out everywhere.
+     */
+    if (user.isBanned) {
+      await Session.deleteMany({ userId: user._id });
+      return res.status(403).json({
+        success: false,
+        message: "This account has been suspended. Please contact support.",
       });
     }
 
