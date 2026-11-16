@@ -15,12 +15,38 @@ import { blockIdentities } from "./blocklist.js";
  * forgetting the images.
  */
 
-/** Destroy every Cloudinary image attached to these products. */
+/**
+ * Destroy every Cloudinary image attached to these products.
+ *
+ * Image deletion must never stop the account cleanup. If the credentials are
+ * missing (for example when the CLI scripts run from a machine that only has
+ * MONGO_URI) or Cloudinary is down, the account and its ads still need to be
+ * removed. The API also throws synchronously for missing config, which would
+ * escape Promise.allSettled, so each call is wrapped.
+ */
 export const destroyProductImages = async (products = []) => {
   const publicIds = products
     .flatMap((product) => product?.productImg || [])
     .map((image) => image?.public_id)
     .filter(Boolean);
+
+  const configured =
+    process.env.CLOUD_NAME && process.env.API_KEY && process.env.API_SECRET;
+
+  if (!publicIds.length) {
+    return { imagesDeleted: 0, imagesFound: 0, imagesSkipped: false };
+  }
+
+  if (!configured) {
+    console.warn(
+      `Skipping ${publicIds.length} Cloudinary image(s): CLOUD_NAME/API_KEY/API_SECRET are not set.`,
+    );
+    return {
+      imagesDeleted: 0,
+      imagesFound: publicIds.length,
+      imagesSkipped: true,
+    };
+  }
 
   let deleted = 0;
   const chunkSize = 20;
@@ -28,7 +54,9 @@ export const destroyProductImages = async (products = []) => {
   for (let i = 0; i < publicIds.length; i += chunkSize) {
     const chunk = publicIds.slice(i, i + chunkSize);
     const results = await Promise.allSettled(
-      chunk.map((publicId) => cloudinary.uploader.destroy(publicId)),
+      chunk.map((publicId) =>
+        Promise.resolve().then(() => cloudinary.uploader.destroy(publicId)),
+      ),
     );
     deleted += results.filter((result) => result.status === "fulfilled").length;
   }

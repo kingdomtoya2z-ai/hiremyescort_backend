@@ -57,6 +57,7 @@ const reason = option("--reason", "Spam or abusive account");
 
 const ids = new Set(csv(option("--ids", "")));
 const emails = new Set(csv(option("--emails", "")));
+const limit = Math.max(Number(option("--limit", "5000")) || 5000, 1);
 
 const collectFromFile = async (file) => {
   const raw = await readFile(file, "utf8");
@@ -147,13 +148,22 @@ if (!validIds.length && !emails.size) {
 
 const users = await User.find({ $or: or })
   .select("_id firstName lastName email phoneNo signupIp role isBanned createdAt")
-  .limit(500)
+  .limit(limit)
   .lean();
 
 if (!users.length) {
   console.log("No matching accounts found.");
   await mongoose.disconnect();
   process.exit(0);
+}
+
+if (users.length === limit) {
+  console.warn(
+    `Warning: the selection hit the ${limit}-account limit, so some accounts were not loaded.`,
+  );
+  console.warn(
+    "Re-run with a higher --limit, or split the selection into smaller batches.",
+  );
 }
 
 console.log(
