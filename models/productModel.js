@@ -17,8 +17,15 @@ const productSchema = new mongoose.Schema(
     titleNormalized: { type: String, default: "", index: true },
     whatsapp: { type: String, required: true },
     contact: { type: String, required: true },
+    /**
+     * Optional Telegram contact. Stored as the user typed it (an @username or a
+     * phone number); `telegramNormalized` is the comparison-only copy used by
+     * the cross-account spam check. Free ads carry no contact at all.
+     */
+    telegram: { type: String, default: "" },
     whatsappNormalized: { type: String, default: "", index: true },
     contactNormalized: { type: String, default: "", index: true },
+    telegramNormalized: { type: String, default: "", index: true },
     gender: { type: String, required: true },
     services: { type: String, required: true },
 
@@ -74,5 +81,6 @@ productSchema.index({
 productSchema.index({ status: 1, isExpired: 1, titleNormalized: 1 });
 productSchema.index({ status: 1, isExpired: 1, contactNormalized: 1 });
 productSchema.index({ status: 1, isExpired: 1, whatsappNormalized: 1 });
+productSchema.index({ status: 1, isExpired: 1, telegramNormalized: 1 });
 
 export const Product = mongoose.model("Product", productSchema);

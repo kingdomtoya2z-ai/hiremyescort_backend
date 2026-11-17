@@ -31,6 +31,11 @@ import {
   isRenewableAdType,
   normalizeAdType,
   normalizeForCompare,
+  normalizeTelegram,
+  telegramComparisonValue,
+  validateTelegram,
+  INVALID_TELEGRAM_MESSAGE,
+  buildCrossAccountQuery,
   similarity,
   stripExpiredAd,
   stripExpiredAds,
@@ -39,6 +44,9 @@ import {
 /* The client mirror is plain ESM with no dependencies, so it imports directly. */
 const clientRules = await import(
   new URL("../../../frontend/hiremyescort_frontend/src/lib/adRules.js", import.meta.url).href
+);
+const clientTelegram = await import(
+  new URL("../../../frontend/hiremyescort_frontend/src/lib/telegram.js", import.meta.url).href
 );
 const {
   showsListingContact,
@@ -115,6 +123,62 @@ const listing = read("../../frontend/hiremyescort_frontend/src/components/ads/Ad
 check("listing strips contact before it reaches the client component",
   /forListingAll\(products\)/.test(listing),
   "whole products would put every non-premium number in the RSC payload");
+
+/* ------------------------------------------------------------------ *
+ * 2a. Telegram is an optional extra contact button
+ * ------------------------------------------------------------------ */
+console.log("\nTelegram contact:");
+eq("empty telegram is valid", validateTelegram(""), null);
+eq("undefined telegram is valid", validateTelegram(undefined), null);
+eq("an @username is valid", validateTelegram("@senorita_2026"), null);
+eq("a pasted t.me link is valid", validateTelegram("https://t.me/senorita_2026"), null);
+eq("a phone number is valid", validateTelegram("+91 98765 43210"), null);
+eq("a short handle is rejected", validateTelegram("@abc"), INVALID_TELEGRAM_MESSAGE);
+eq("a bad mobile is rejected", validateTelegram("12345"), INVALID_TELEGRAM_MESSAGE);
+eq("pasted link is stored bare", normalizeTelegram("https://t.me/senorita_2026/"), "senorita_2026");
+eq("@ is stripped", normalizeTelegram("@senorita_2026"), "senorita_2026");
+eq("a username compares case-insensitively",
+  telegramComparisonValue("@Senorita_2026"),
+  telegramComparisonValue("senorita_2026"));
+eq("a number compares to the last 10 digits",
+  telegramComparisonValue("+91 98765 43210"),
+  telegramComparisonValue("9876543210"));
+
+// The Telegram signal joins the other contact fields in the cross-account check.
+const telegramQuery = buildCrossAccountQuery("owner-1", {
+  title: "A long enough title",
+  telegram: "@shared_handle_99",
+});
+check("cross-account check includes the telegram index",
+  telegramQuery.$or.some((clause) => clause.telegramNormalized !== undefined),
+  "the same Telegram handle on another account must be caught");
+const phoneTelegramQuery = buildCrossAccountQuery("owner-1", {
+  title: "",
+  telegram: "9876543210",
+});
+check("a telegram phone is checked against the phone indexes too",
+  phoneTelegramQuery.$or.some((clause) => clause.contactNormalized !== undefined),
+  "reusing a call/WhatsApp number as Telegram must be caught");
+
+// Listing payloads must not leak a Telegram handle that has no button on the row.
+check("listing payload drops a golden telegram handle",
+  forListing({ adType: "golden", telegram: "@hidden_handle" }).telegram === undefined);
+check("listing payload drops an expired telegram handle",
+  forListing({ status: "expired", adType: "premium", telegram: "@hidden_handle" }).telegram === undefined);
+eq("listing payload keeps a live premium telegram handle",
+  forListing({ adType: "premium", telegram: "@live_handle" }).telegram, "@live_handle");
+eq("expired ads lose their telegram handle", stripExpiredAd({ status: "expired", telegram: "@gone" }).telegram, "");
+
+// The link builder must accept both shapes and never emit a malformed URL.
+eq("username link", clientTelegram.telegramHref("@senorita_2026"), "https://t.me/senorita_2026");
+eq("phone link", clientTelegram.telegramHref("+91 98765 43210"), "https://t.me/+919876543210");
+eq("empty telegram has no link", clientTelegram.telegramHref(""), null);
+eq("client accepts a country-code mobile", clientTelegram.isValidTelegram("+91 98765 43210"), true);
+eq("client rejects a short handle", clientTelegram.isValidTelegram("@abc"), false);
+eq("client validation matches the backend",
+  ["", "@senorita_2026", "https://t.me/senorita_2026", "+91 98765 43210", "@abc", "12345"].every(
+    (value) => clientTelegram.isValidTelegram(value) === (validateTelegram(value) === null),
+  ), true);
 
 /* ------------------------------------------------------------------ *
  * 2b. Expired ads stay listed but lose media and contact
@@ -244,6 +308,13 @@ check("update: duplicate check runs", /findDuplicateAd\(\s*\n?\s*product\.userId
 check("update: contact cleared when downgraded to free",
   /keepsContact\s*\?\s*\(whatsapp/.test(controller),
   "downgrading to free must drop the stored numbers, not just hide them");
+check("telegram is validated before it is stored",
+  /validateTelegram\(telegram\)/.test(controller),
+  "a malformed handle must not become a dead button on the ad");
+check("telegram is cleared on downgrade",
+  /product\.telegram = nextTelegram/.test(controller) &&
+    /const nextTelegram = keepsContact/.test(controller),
+  "a downgraded ad must not keep a hidden Telegram handle");
 check("approval uses the shared expiry helper",
   /expiryDate = calculateExpiryDate\(/.test(controller),
   "a local copy of the window is how the two copies drifted apart before");

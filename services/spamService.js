@@ -1,7 +1,10 @@
 import { Product } from "../models/productModel.js";
 import { User } from "../models/userModel.js";
 import { canonicalEmail, normalizePhone } from "../utils/identity.js";
-import { normalizeForCompare } from "../utils/adValidation.js";
+import {
+  normalizeForCompare,
+  telegramComparisonValue,
+} from "../utils/adValidation.js";
 
 /**
  * Group accounts that look like the same person.
@@ -17,6 +20,7 @@ import { normalizeForCompare } from "../utils/adValidation.js";
  *   - same canonical Gmail mailbox (dot / +tag aliases)
  *   - same signup IP
  *   - same contact / WhatsApp number on an ad
+ *   - same Telegram username or number on an ad
  *   - same normalised ad title
  *
  * Accounts are joined into connected components, so a person using three
@@ -105,11 +109,18 @@ export const buildSpamClusters = ({
     for (const [field, raw] of [
       ["contact", product.contactNormalized || product.contact],
       ["whatsapp", product.whatsappNormalized || product.whatsapp],
+      ["telegram", product.telegramNormalized || product.telegram],
     ]) {
       const phone = normalizePhone(raw);
       if (isUsablePhone(phone)) {
         addSignal(`ad-${field}:${phone}`, `Same ad ${field} number`, id);
       }
+    }
+
+    const telegram = telegramComparisonValue(product.telegram);
+    // A username has no digits, so it would not pass the phone signal above.
+    if (telegram && !/^\d+$/.test(telegram)) {
+      addSignal(`ad-telegram:${telegram}`, "Same ad Telegram username", id);
     }
   }
 
@@ -215,7 +226,7 @@ export const findSpamClusters = async ({ minUsers = 2, userLimit = 10000, adLimi
       isExpired: false,
     })
       .select(
-        "userId title titleNormalized contact contactNormalized whatsapp whatsappNormalized createdAt status",
+        "userId title titleNormalized contact contactNormalized whatsapp whatsappNormalized telegram telegramNormalized createdAt status",
       )
       .limit(adLimit)
       .lean(),

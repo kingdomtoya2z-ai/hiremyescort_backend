@@ -17,7 +17,7 @@ import { User } from "../models/userModel.js";
 import { Product } from "../models/productModel.js";
 import { canonicalEmail } from "../utils/identity.js";
 import { normalizePhone } from "../utils/identity.js";
-import { normalizeForCompare } from "../utils/adValidation.js";
+import { normalizeForCompare, telegramComparisonValue } from "../utils/adValidation.js";
 
 const confirm = process.argv.includes("--confirm");
 
@@ -69,7 +69,7 @@ while (true) {
   const filter = lastProductId ? { _id: { $gt: lastProductId } } : {};
   const batch = await Product.find(filter)
     .select(
-      "_id title titleNormalized contact contactNormalized whatsapp whatsappNormalized",
+      "_id title titleNormalized contact contactNormalized whatsapp whatsappNormalized telegram telegramNormalized",
     )
     .sort({ _id: 1 })
     .limit(batchSize)
@@ -83,11 +83,13 @@ while (true) {
     const titleNormalized = normalizeForCompare(product.title);
     const contactNormalized = normalizePhone(product.contact);
     const whatsappNormalized = normalizePhone(product.whatsapp);
+    const telegramNormalized = telegramComparisonValue(product.telegram);
 
     if (
       product.titleNormalized === titleNormalized &&
       product.contactNormalized === contactNormalized &&
-      product.whatsappNormalized === whatsappNormalized
+      product.whatsappNormalized === whatsappNormalized &&
+      product.telegramNormalized === telegramNormalized
     ) {
       continue;
     }
@@ -96,7 +98,12 @@ while (true) {
       updateOne: {
         filter: { _id: product._id },
         update: {
-          $set: { titleNormalized, contactNormalized, whatsappNormalized },
+          $set: {
+            titleNormalized,
+            contactNormalized,
+            whatsappNormalized,
+            telegramNormalized,
+          },
         },
       },
     });

@@ -143,6 +143,54 @@ export function normalizeAdType(adType) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Telegram (optional contact)
+ * ------------------------------------------------------------------ */
+
+const TELEGRAM_USERNAME = /^[A-Za-z0-9_]{5,32}$/;
+
+export const INVALID_TELEGRAM_MESSAGE =
+  "Enter a valid Telegram username (@username) or a 10-digit mobile number.";
+
+/**
+ * Bare form of a Telegram contact, safe to put after `https://t.me/`.
+ *
+ * Users paste this several ways: "@name", "t.me/name", "https://t.me/name" or
+ * a phone number with spaces. Strip the decoration so one field serves both a
+ * username and a number, and so the same contact cannot be stored twice in two
+ * different shapes.
+ */
+export const normalizeTelegram = (value) =>
+  String(value || "")
+    .trim()
+    .replace(/^https?:\/\/(?:www\.)?(?:t\.me|telegram\.me)\//i, "")
+    .replace(/^@/, "")
+    .replace(/\/+$/, "");
+
+/** Comparison-only form: last 10 digits for a number, lower-cased username otherwise. */
+export const telegramComparisonValue = (value) => {
+  const bare = normalizeTelegram(value);
+  if (!bare) return "";
+  const digits = bare.replace(/\D/g, "");
+  return digits.length >= 10 ? normalizePhone(digits) : bare.toLowerCase();
+};
+
+/** Optional field, so empty is always valid. Returns a message or null. */
+export const validateTelegram = (value) => {
+  const bare = normalizeTelegram(value);
+  if (!bare) return null;
+
+  const compact = bare.replace(/[\s()+.-]/g, "");
+  if (/^\d+$/.test(compact)) {
+    // Accept the same shapes as the phone helpers do: a bare 10-digit mobile
+    // or one already carrying the country code.
+    return /^[6-9]\d{9}$/.test(normalizePhone(compact))
+      ? null
+      : INVALID_TELEGRAM_MESSAGE;
+  }
+  return TELEGRAM_USERNAME.test(bare) ? null : INVALID_TELEGRAM_MESSAGE;
+};
+
+/* ------------------------------------------------------------------ *
  * Expiry / renewal
  * ------------------------------------------------------------------ */
 
@@ -172,7 +220,7 @@ export const isRenewableAdType = (adType) =>
  */
 export const stripExpiredAd = (ad) => {
   if (!ad || !isExpiredAd(ad)) return ad;
-  return { ...ad, productImg: [], contact: "", whatsapp: "" };
+  return { ...ad, productImg: [], contact: "", whatsapp: "", telegram: "" };
 };
 
 export const stripExpiredAds = (ads) => (ads || []).map(stripExpiredAd);
@@ -335,7 +383,7 @@ const isComparablePhone = (value) => /^[6-9]\d{9}$/.test(value);
  */
 export const buildCrossAccountQuery = (
   userId,
-  { title, contact, whatsapp } = {},
+  { title, contact, whatsapp, telegram } = {},
   excludeProductId,
 ) => {
   const or = [];
@@ -355,14 +403,25 @@ export const buildCrossAccountQuery = (
     }
   }
 
-  const phones = [...new Set([normalizePhone(contact), normalizePhone(whatsapp)])]
-    .filter(isComparablePhone);
+  const phones = [
+    ...new Set([normalizePhone(contact), normalizePhone(whatsapp), normalizePhone(telegram)]),
+  ].filter(isComparablePhone);
 
   if (phones.length) {
     or.push(
       { contactNormalized: { $in: phones } },
       { whatsappNormalized: { $in: phones } },
     );
+  }
+
+  // A Telegram username is not a phone, so it needs its own comparison field.
+  // The phone form is included too, so the same number reused as a Telegram
+  // contact is caught even if it was first posted as a call/WhatsApp number.
+  const telegramValues = [
+    ...new Set([telegramComparisonValue(telegram), normalizePhone(telegram)]),
+  ].filter(Boolean);
+  if (telegramValues.length) {
+    or.push({ telegramNormalized: { $in: telegramValues } });
   }
 
   if (!or.length) return null;
@@ -387,18 +446,18 @@ export const buildCrossAccountQuery = (
  */
 export const findCrossAccountSpam = async (
   userId,
-  { title, contact, whatsapp } = {},
+  { title, contact, whatsapp, telegram } = {},
   excludeProductId,
 ) => {
   const query = buildCrossAccountQuery(
     userId,
-    { title, contact, whatsapp },
+    { title, contact, whatsapp, telegram },
     excludeProductId,
   );
   if (!query) return null;
 
   const existing = await Product.findOne(query)
-    .select("userId title contact whatsapp")
+    .select("userId title contact whatsapp telegram")
     .lean();
 
   if (!existing) return null;
@@ -409,9 +468,13 @@ export const findCrossAccountSpam = async (
   const samePhone =
     phones.includes(normalizePhone(existing.contact)) ||
     phones.includes(normalizePhone(existing.whatsapp));
+  const telegramValue = telegramComparisonValue(telegram);
+  const sameTelegram =
+    Boolean(telegramValue) &&
+    telegramComparisonValue(existing.telegram) === telegramValue;
 
   return {
-    reason: samePhone ? "contact" : "title",
+    reason: samePhone || sameTelegram ? "contact" : "title",
     existing,
   };
 };

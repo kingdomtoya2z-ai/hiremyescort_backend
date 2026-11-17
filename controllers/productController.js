@@ -30,6 +30,9 @@ import {
   isExpiredAd,
   isRenewableAdType,
   stripExpiredAd,
+  normalizeTelegram,
+  telegramComparisonValue,
+  validateTelegram,
 } from "../utils/adValidation.js";
 
 import {
@@ -48,6 +51,7 @@ export const addProduct = async (req, res) => {
       title,
       whatsapp,
       contact,
+      telegram,
       gender,
       services,
       category,
@@ -141,6 +145,14 @@ export const addProduct = async (req, res) => {
       return res.status(400).json({ success: false, message: textError });
     }
 
+    // Telegram is optional: empty means "no Telegram button". A half-typed
+    // handle is rejected here rather than becoming a dead link on the ad.
+    const telegramError = validateTelegram(telegram);
+    if (telegramError) {
+      return res.status(400).json({ success: false, message: telegramError });
+    }
+    telegram = normalizeTelegram(telegram);
+
     // Only premium ads carry contact details. Free and golden drop them here so
     // the numbers are never written to the database, rather than being stored
     // and merely hidden in the UI.
@@ -148,6 +160,7 @@ export const addProduct = async (req, res) => {
     if (!allowsContact(adType)) {
       whatsapp = "";
       contact = "";
+      telegram = "";
     }
 
     // The locality has to be one the admin configured for this city. A city with no
@@ -182,6 +195,7 @@ export const addProduct = async (req, res) => {
       title,
       contact,
       whatsapp,
+      telegram,
     });
     if (crossAccount) {
       return res.status(400).json({
@@ -335,6 +349,8 @@ export const addProduct = async (req, res) => {
       whatsappNormalized: normalizePhone(whatsapp),
       contact,
       contactNormalized: normalizePhone(contact),
+      telegram,
+      telegramNormalized: telegramComparisonValue(telegram),
       gender,
       services,
       category,
@@ -597,6 +613,7 @@ export const updateProduct = async (req, res) => {
       title,
       whatsapp,
       contact,
+      telegram,
       gender,
       services,
       category,
@@ -711,6 +728,17 @@ export const updateProduct = async (req, res) => {
     const nextWhatsapp = keepsContact ? (whatsapp ?? product.whatsapp) : "";
     const nextContact = keepsContact ? (contact ?? product.contact) : "";
 
+    // Telegram stays optional, and an omitted field on an API edit means "keep
+    // the current one". The form always sends it (empty to clear it), which is
+    // why `??` rather than `||` is used here.
+    const telegramError = validateTelegram(telegram ?? product.telegram);
+    if (telegramError) {
+      return res.status(400).json({ success: false, message: telegramError });
+    }
+    const nextTelegram = keepsContact
+      ? normalizeTelegram(telegram ?? product.telegram)
+      : "";
+
     // The locality has to be one the admin configured for the city this edit is
     // saving, which may be a different city from the one it was posted in.
     const nextState = state ?? product.state;
@@ -749,6 +777,7 @@ export const updateProduct = async (req, res) => {
         title: title ?? product.title,
         contact: nextContact,
         whatsapp: nextWhatsapp,
+        telegram: nextTelegram,
       },
       productId,
     );
@@ -985,6 +1014,7 @@ export const updateProduct = async (req, res) => {
     product.title = title ?? product.title;
     product.whatsapp = nextWhatsapp;
     product.contact = nextContact;
+    product.telegram = nextTelegram;
     product.gender = gender ?? product.gender;
     product.services = services ?? product.services;
 
@@ -1017,6 +1047,7 @@ export const updateProduct = async (req, res) => {
     product.titleNormalized = normalizeForCompare(product.title);
     product.contactNormalized = normalizePhone(product.contact);
     product.whatsappNormalized = normalizePhone(product.whatsapp);
+    product.telegramNormalized = telegramComparisonValue(product.telegram);
 
     if (wantsRenew) {
       /*
@@ -1085,6 +1116,7 @@ export const adminUpdateProduct = async (req, res) => {
       title,
       whatsapp,
       contact,
+      telegram,
       gender,
       services,
       category,
@@ -1118,6 +1150,14 @@ export const adminUpdateProduct = async (req, res) => {
     const keepsContact = allowsContact(newAdType);
     const nextWhatsapp = keepsContact ? (whatsapp ?? product.whatsapp) : "";
     const nextContact = keepsContact ? (contact ?? product.contact) : "";
+
+    const telegramError = validateTelegram(telegram ?? product.telegram);
+    if (telegramError) {
+      return res.status(400).json({ success: false, message: telegramError });
+    }
+    const nextTelegram = keepsContact
+      ? normalizeTelegram(telegram ?? product.telegram)
+      : "";
 
     const nextState = state ?? product.state;
     const nextCity = city ?? product.city;
@@ -1248,6 +1288,7 @@ export const adminUpdateProduct = async (req, res) => {
     product.title = title ?? product.title;
     product.whatsapp = nextWhatsapp;
     product.contact = nextContact;
+    product.telegram = nextTelegram;
     product.gender = gender ?? product.gender;
     product.services = services ?? product.services;
 
@@ -1276,6 +1317,7 @@ export const adminUpdateProduct = async (req, res) => {
     product.titleNormalized = normalizeForCompare(product.title);
     product.contactNormalized = normalizePhone(product.contact);
     product.whatsappNormalized = normalizePhone(product.whatsapp);
+    product.telegramNormalized = telegramComparisonValue(product.telegram);
 
     // Status, approvalDate, expiryDate, isExpired and coinsRefunded are
     // intentionally untouched.
