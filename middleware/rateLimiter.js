@@ -73,9 +73,10 @@ export const generalLimiter = rateLimit({
  * times in an afternoon would be locked out until the window expired. Only
  * failures accumulate, so the budget is spent by guessing rather than by use.
  *
- * A correct password does count against the separate per-ACCOUNT budget in
- * `ACCOUNT_WINDOWS.login`, which is what stops a distributed attack where every
- * attempt comes from a different address.
+ * The per-ACCOUNT budget now also skips successful requests (see the
+ * rollback in `accountLimiter`), so a legitimate user signing in a few times
+ * is not locked out. Failed guesses - the only thing a distributed attacker
+ * can produce - still count against it.
  */
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -277,6 +278,23 @@ export function accountLimiter(action, getAccount) {
         message: `Too many attempts for this account. Please try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
       });
     }
+
+    /*
+     * Skip successful requests, mirroring `skipSuccessfulRequests` on the
+     * per-IP limiters. A successful sign-in / sign-up / verification must not
+     * spend the account's attempt budget, otherwise a legitimate user who
+     * simply uses the site a few times in a quarter of an hour is locked out
+     * even though they never guessed a password. Only outcomes that fail (4xx/
+     * 5xx) keep counting, so the budget is still spent by guessing rather than
+     * by use. The counter is rolled back once the response has finished, so
+     * the decision is based on the real outcome rather than a guess made before
+     * the controller runs.
+     */
+    res.on("finish", () => {
+      if (res.statusCode >= 200 && res.statusCode < 400) {
+        entry.count = Math.max(0, entry.count - 1);
+      }
+    });
 
     return next();
   };
