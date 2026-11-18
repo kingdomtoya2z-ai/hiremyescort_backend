@@ -94,9 +94,15 @@ export const blockIdentities = async (
   }
 };
 
-export const listBlockedIdentities = async ({ type, limit = 200 } = {}) => {
+export const listBlockedIdentities = async ({ type, limit = 200, search } = {}) => {
   const filter = type ? { type } : {};
-  const cap = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+  if (search && String(search).trim()) {
+    const term = String(search).trim();
+    const safe = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(safe, "i");
+    filter.$or = [{ value: regex }, { reason: regex }];
+  }
+  const cap = Math.min(Math.max(Number(limit) || 200, 1), 5000);
   return BlockedIdentity.find(filter).sort({ createdAt: -1 }).limit(cap).lean();
 };
 

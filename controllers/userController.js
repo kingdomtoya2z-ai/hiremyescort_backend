@@ -1068,6 +1068,7 @@ export const getBlockedIdentities = async (req, res) => {
     const identities = await listBlockedIdentities({
       type: req.query.type,
       limit: req.query.limit,
+      search: req.query.search,
     });
 
     return res.status(200).json({ success: true, identities });
